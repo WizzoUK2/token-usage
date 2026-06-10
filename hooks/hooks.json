@@ -1,0 +1,16 @@
+{
+  "description": "Keeps a per-session token-usage ledger up to date after every turn (powers instant /token-usage:report and the optional statusline)",
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/token_usage.py\" hook",
+            "timeout": 15
+          }
+        ]
+      }
+    ]
+  }
+}
