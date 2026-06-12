@@ -447,7 +447,8 @@ def run_hook():
         prior_notified = False
         if ledger.exists():
             try:
-                prior_notified = bool(json.loads(ledger.read_text()).get("budget_notified"))
+                prior = json.loads(ledger.read_text())
+                prior_notified = isinstance(prior, dict) and bool(prior.get("budget_notified"))
             except (json.JSONDecodeError, OSError):
                 pass
         limit = None

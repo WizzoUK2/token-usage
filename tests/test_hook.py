@@ -8,6 +8,7 @@ from conftest import SCRIPT, assistant, usage, user, write_jsonl
 
 def run_hook(payload, tmp_path, extra_env=None):
     env = {**os.environ, "TOKEN_USAGE_LEDGER_DIR": str(tmp_path / "ledger")}
+    env.pop("TOKEN_USAGE_BUDGET_USD", None)
     env.update(extra_env or {})
     return subprocess.run(
         [sys.executable, str(SCRIPT), "hook"],
@@ -59,3 +60,30 @@ def test_budget_unset_or_invalid_is_inert(tmp_path):
         r = run_hook({"session_id": "bud-2", "transcript_path": str(t)}, tmp_path, env)
         assert r.returncode == 0
         assert r.stdout.strip() == ""
+
+
+def test_budget_under_limit_is_silent_and_unarmed(tmp_path):
+    t = make_transcript(tmp_path, out_tokens=1000)        # ≈ $0.05, well under $10
+    payload = {"session_id": "bud-3", "transcript_path": str(t)}
+    env = {"TOKEN_USAGE_BUDGET_USD": "10"}
+    r = run_hook(payload, tmp_path, env)
+    assert r.returncode == 0
+    assert r.stdout.strip() == ""
+    ledger = json.loads((tmp_path / "ledger" / "bud-3.json").read_text())
+    assert ledger["budget_notified"] is False              # not prematurely armed
+    # Session grows past the limit -> the nudge then fires.
+    make_transcript(tmp_path, out_tokens=1_000_000)
+    r2 = run_hook(payload, tmp_path, env)
+    assert "passed your $10.00 budget" in json.loads(r2.stdout)["systemMessage"]
+
+
+def test_hook_recovers_from_non_dict_ledger(tmp_path):
+    t = make_transcript(tmp_path)
+    payload = {"session_id": "bud-4", "transcript_path": str(t)}
+    ledger_dir = tmp_path / "ledger"
+    ledger_dir.mkdir(parents=True)
+    (ledger_dir / "bud-4.json").write_text("[1, 2, 3]")    # valid JSON, wrong shape
+    r = run_hook(payload, tmp_path)
+    assert r.returncode == 0
+    ledger = json.loads((ledger_dir / "bud-4.json").read_text())
+    assert ledger["total"]["usage"]["output"] == 1000      # ledger self-healed
