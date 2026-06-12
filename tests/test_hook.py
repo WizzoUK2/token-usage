@@ -35,3 +35,27 @@ def test_hook_never_fails_on_garbage(tmp_path):
                        capture_output=True, text=True,
                        env={**os.environ, "TOKEN_USAGE_LEDGER_DIR": str(tmp_path)})
     assert r.returncode == 0
+
+
+def test_budget_nudge_fires_once(tmp_path):
+    t = make_transcript(tmp_path, out_tokens=1_000_000)  # 1MTok fable output ≈ $50
+    payload = {"session_id": "bud-1", "transcript_path": str(t)}
+    env = {"TOKEN_USAGE_BUDGET_USD": "10"}
+    r1 = run_hook(payload, tmp_path, env)
+    assert r1.returncode == 0
+    msg = json.loads(r1.stdout)
+    assert "passed your $10.00 budget" in msg["systemMessage"]
+    assert "/big" in msg["systemMessage"]
+    ledger = json.loads((tmp_path / "ledger" / "bud-1.json").read_text())
+    assert ledger["budget_notified"] is True
+    r2 = run_hook(payload, tmp_path, env)                 # second run: silent
+    assert r2.returncode == 0
+    assert r2.stdout.strip() == ""
+
+
+def test_budget_unset_or_invalid_is_inert(tmp_path):
+    t = make_transcript(tmp_path, out_tokens=1_000_000)
+    for env in ({}, {"TOKEN_USAGE_BUDGET_USD": "not-a-number"}):
+        r = run_hook({"session_id": "bud-2", "transcript_path": str(t)}, tmp_path, env)
+        assert r.returncode == 0
+        assert r.stdout.strip() == ""

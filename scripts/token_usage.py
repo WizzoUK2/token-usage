@@ -293,7 +293,7 @@ def parse_session(transcript_path):
             seg = segments[idx]
             merge_by_model(seg["by_model"], a_by_model)
             seg["subagents"].append({
-                "type": meta.get("agentType", "agent"),
+                "type": (meta.get("agentType") or "agent"),
                 "description": meta.get("description", ""),
                 "output_tokens": sum_buckets(a_by_model)["output"],
                 "by_model": a_by_model,
@@ -443,6 +443,23 @@ def run_hook():
         data["transcript_path"] = str(transcript)
         LEDGER_DIR.mkdir(parents=True, exist_ok=True)
         ledger = LEDGER_DIR / f"{session_id}.json"
+
+        prior_notified = False
+        if ledger.exists():
+            try:
+                prior_notified = bool(json.loads(ledger.read_text()).get("budget_notified"))
+            except (json.JSONDecodeError, OSError):
+                pass
+        limit = None
+        try:
+            limit = float(os.environ["TOKEN_USAGE_BUDGET_USD"])
+        except (KeyError, ValueError):
+            pass
+        cost = data["total"]["cost_usd"]
+        fire = (limit is not None and not prior_notified
+                and cost is not None and cost >= limit)
+        data["budget_notified"] = prior_notified or fire
+
         tmp = ledger.with_suffix(".tmp")
         tmp.write_text(json.dumps(data, indent=1))
         tmp.replace(ledger)
@@ -451,6 +468,15 @@ def run_hook():
             (LEDGER_DIR / "latest.json").symlink_to(ledger)
         except OSError:
             pass
+        if fire:
+            top = "—"
+            if data["by_label"]:
+                top = max(data["by_label"].items(),
+                          key=lambda kv: kv[1]["cost_usd"] or 0)[0]
+            print(json.dumps({"systemMessage":
+                f"token-usage: session estimate ${cost:.2f} has passed your "
+                f"${limit:.2f} budget — top consumer: {top}"}))
+
     except Exception:
         return 0  # a broken ledger update must never break the session
     return 0
