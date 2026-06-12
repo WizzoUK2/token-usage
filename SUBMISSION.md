@@ -71,8 +71,8 @@ estimates for subscription users.
 
 **Documentation link:**
 https://discovery.wickedsick.com/token-usage-claude-code-plugin-documentation
-README https://github.com/WizzoUK2/token-usage#readme is the canonical
-fallback.)
+(The GitHub README https://github.com/WizzoUK2/token-usage#readme is the
+canonical fallback.)
 
 **Example use cases:**
 
