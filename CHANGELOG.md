@@ -6,6 +6,26 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-06-12
+
+### Changed
+
+- **Sticky attribution (behaviour change):** a slash command now owns every
+  turn until the next command, so per-command numbers grow vs 0.1.x for the
+  same transcript. `(no command)` covers only turns before the first command.
+
+### Added
+
+- `history` subcommand — cross-session rollups by project, day (local time),
+  or command, with an incremental per-transcript cache (`--since 7d`, `--json`).
+- `report --agents` — per-agent-type breakdown rows (subsets of the parent
+  row); `json` output gains `agents` arrays per label and segment.
+- `report|json --diff OLD NEW` — per-label cost/output deltas between two
+  transcripts; deterministic ordering; unpriceable sides render as unknown.
+- Budget nudges: set `TOKEN_USAGE_BUDGET_USD` and the Stop hook emits a
+  one-time warning when the session's estimated cost crosses it.
+- Test suite (pytest, 29 tests) and GitHub Actions CI (Python 3.9 + 3.12).
+
 ## [0.1.1] — 2026-06-12
 
 ### Changed
@@ -43,6 +63,7 @@ Initial release.
 - Standalone CLI: `python3 scripts/token_usage.py report|json [transcript]`.
 - Optional statusline example (`examples/statusline.sh`, requires `jq`).
 
-[Unreleased]: https://github.com/WizzoUK2/token-usage/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/WizzoUK2/token-usage/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/WizzoUK2/token-usage/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/WizzoUK2/token-usage/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/WizzoUK2/token-usage/releases/tag/v0.1.0

@@ -3,9 +3,10 @@
 
 Parses Claude Code session transcripts (~/.claude/projects/<project>/<session>.jsonl),
 deduplicates streamed usage entries by requestId (taking per-field maxima, since
-streamed duplicates may carry partial usage snapshots), segments the session by
-slash-command invocations, rolls subagent transcripts up into the segment that
-spawned them, and prices the result against a bundled pricing table.
+streamed duplicates may carry partial usage snapshots), segments the session at
+slash-command invocations (a command owns all turns until the next command),
+rolls subagent transcripts up into the segment that spawned them, and prices
+the result against a bundled pricing table.
 
 Subcommands:
     report [TRANSCRIPT]   Markdown breakdown table (default: latest session in cwd project)
@@ -231,8 +232,15 @@ def parse_session(transcript_path):
         if is_user_prompt(entry):
             text = text_of((entry.get("message") or {}).get("content"))
             m = COMMAND_RE.search(text)
-            label = m.group(1).strip() if m else OTHER_LABEL
-            new_segment(label, entry.get("timestamp"), "" if m else text)
+            if m:
+                # A command always starts a new segment...
+                new_segment(m.group(1).strip(), entry.get("timestamp"))
+            elif not segments:
+                # ...but a plain prompt only starts the one pre-command segment;
+                # otherwise the active segment keeps ownership (sticky attribution).
+                new_segment(OTHER_LABEL, entry.get("timestamp"), text)
+            elif segments[-1]["label"] == OTHER_LABEL and not segments[-1]["prompt"]:
+                segments[-1]["prompt"] = text.strip()[:120]
             continue
         if entry.get("type") != "assistant":
             continue
@@ -285,11 +293,26 @@ def parse_session(transcript_path):
             seg = segments[idx]
             merge_by_model(seg["by_model"], a_by_model)
             seg["subagents"].append({
-                "type": meta.get("agentType", "agent"),
+                "type": (meta.get("agentType") or "agent"),
                 "description": meta.get("description", ""),
                 "output_tokens": sum_buckets(a_by_model)["output"],
+                "by_model": a_by_model,
             })
     return segments
+
+
+def agents_by_type(subagents, pricing):
+    """Group subagent entries by agent type with summed usage and cost."""
+    groups = {}
+    for a in subagents:
+        g = groups.setdefault(a["type"], {"count": 0, "by_model": {}})
+        g["count"] += 1
+        merge_by_model(g["by_model"], a.get("by_model") or {})
+    out = [{"type": t, "count": g["count"],
+            "usage": sum_buckets(g["by_model"]),
+            "cost_usd": cost_usd(g["by_model"], pricing)}
+           for t, g in groups.items()]
+    return sorted(out, key=lambda g: -(g["cost_usd"] or g["usage"]["output"] / 1e6))
 
 
 def aggregate(segments, pricing):
@@ -302,9 +325,11 @@ def aggregate(segments, pricing):
         agg["subagents"] += len(seg["subagents"])
         merge_by_model(agg["by_model"], seg["by_model"])
         merge_by_model(total_by_model, seg["by_model"])
+        agg.setdefault("_subagents", []).extend(seg["subagents"])
     for agg in by_label.values():
         agg["usage"] = sum_buckets(agg["by_model"])
         agg["cost_usd"] = cost_usd(agg["by_model"], pricing)
+        agg["agents"] = agents_by_type(agg.pop("_subagents", []), pricing)
     return {
         "by_label": by_label,
         "total": {
@@ -314,7 +339,10 @@ def aggregate(segments, pricing):
             "models": sorted(total_by_model),
         },
         "segments": [
-            {**{k: s[k] for k in ("label", "start_ts", "prompt", "subagents")},
+            {**{k: s[k] for k in ("label", "start_ts", "prompt")},
+             "subagents": [{k: v for k, v in a.items() if k != "by_model"}
+                           for a in s["subagents"]],
+             "agents": agents_by_type(s["subagents"], pricing),
              "usage": sum_buckets(s["by_model"]),
              "cost_usd": cost_usd(s["by_model"], pricing)}
             for s in segments
@@ -334,7 +362,13 @@ def fmt_cost(c):
     return f"${c:.2f}" if c is not None else "—"
 
 
-def render_report(data):
+def fmt_cost_delta(c):
+    if c is None:
+        return "—"
+    return f"{'-' if c < 0 else '+'}${abs(c):.2f}"
+
+
+def render_report(data, show_agents=False):
     lines = [
         "| Activity | Calls | Output | Input | Cache read | Cache write | Est. cost |",
         "|---|---:|---:|---:|---:|---:|---:|",
@@ -353,6 +387,14 @@ def render_report(data):
             f"| {fmt_tokens(u['cache_read'])} | {fmt_tokens(u['cache_5m'] + u['cache_1h'])} "
             f"| {fmt_cost(agg['cost_usd'])} |"
         )
+        if show_agents and agg.get("agents"):
+            for g in agg["agents"]:
+                gu = g["usage"]
+                lines.append(
+                    f"| ↳ {g['type']} ×{g['count']} | | {fmt_tokens(gu['output'])} | {fmt_tokens(gu['input'])} "
+                    f"| {fmt_tokens(gu['cache_read'])} | {fmt_tokens(gu['cache_5m'] + gu['cache_1h'])} "
+                    f"| {fmt_cost(g['cost_usd'])} |"
+                )
     t = data["total"]
     u = t["usage"]
     lines.append(
@@ -367,6 +409,184 @@ def render_report(data):
         lines.append(f"Prompt caching saved ~{fmt_cost(savings)} vs. full input rates.")
     lines.append(f"Models: {models}. Cost is an API-price estimate (cache-aware); "
                  "subscription plans are not billed per token.")
+    return "\n".join(lines)
+
+
+def diff_data(old_path, new_path, pricing):
+    """Compare two transcripts label-by-label. Rows ordered by |Δ cost| desc."""
+    a = aggregate(parse_session(old_path), pricing)
+    b = aggregate(parse_session(new_path), pricing)
+    rows = []
+    for label in sorted(set(a["by_label"]) | set(b["by_label"])):
+        ra, rb = a["by_label"].get(label), b["by_label"].get(label)
+        ca = ra["cost_usd"] if ra else None
+        cb = rb["cost_usd"] if rb else None
+        oa = ra["usage"]["output"] if ra else 0
+        ob = rb["usage"]["output"] if rb else 0
+        # Absent on a side genuinely means $0 spent there; present-but-unpriceable
+        # means unknown — a delta against unknown is itself unknown.
+        unpriceable = (ra is not None and ca is None) or (rb is not None and cb is None)
+        delta_cost = None if unpriceable else (cb if rb else 0.0) - (ca if ra else 0.0)
+        rows.append({"label": label, "a_cost": ca, "b_cost": cb,
+                     "a_output": oa, "b_output": ob,
+                     "delta_cost": delta_cost,
+                     "delta_output": ob - oa})
+    rows.sort(key=lambda r: (-abs(r["delta_cost"] or 0.0), r["label"]))
+    return {"a_total": a["total"], "b_total": b["total"], "rows": rows}
+
+
+def render_diff(d):
+    lines = ["| Activity | A cost | B cost | Δ cost | Δ output |",
+             "|---|---:|---:|---:|---:|"]
+    for r in d["rows"]:
+        name = r["label"] if r["label"] == OTHER_LABEL else f"`{r['label']}`"
+        sign = "+" if r["delta_output"] >= 0 else "-"
+        lines.append(f"| {name} | {fmt_cost(r['a_cost'])} | {fmt_cost(r['b_cost'])} "
+                     f"| {fmt_cost_delta(r['delta_cost'])} | {sign}{fmt_tokens(abs(r['delta_output']))} |")
+    ta, tb = d["a_total"], d["b_total"]
+    dt = None
+    if ta["cost_usd"] is not None and tb["cost_usd"] is not None:
+        dt = tb["cost_usd"] - ta["cost_usd"]
+    do = tb["usage"]["output"] - ta["usage"]["output"]
+    sign = "+" if do >= 0 else "-"
+    lines.append(f"| **Total** | **{fmt_cost(ta['cost_usd'])}** | **{fmt_cost(tb['cost_usd'])}** "
+                 f"| **{fmt_cost_delta(dt)}** | **{sign}{fmt_tokens(abs(do))}** |")
+    return "\n".join(lines)
+
+
+INDEX_VERSION = 1
+
+
+def projects_dir():
+    return Path(os.environ.get("TOKEN_USAGE_PROJECTS_DIR",
+                               Path.home() / ".claude" / "projects"))
+
+
+def index_dir():
+    return Path(os.environ.get("TOKEN_USAGE_LEDGER_DIR",
+                               Path.home() / ".cache" / "token-usage")) / "index"
+
+
+def summarize_transcript(path, pricing, st=None):
+    # Stat BEFORE parsing: if the transcript is appended mid-parse, the recorded
+    # mtime is then stale and the next run re-parses — never a silently stale cache.
+    st = st or path.stat()
+    segs = parse_session(path)
+    data = aggregate(segs, pricing)
+    return {
+        "version": INDEX_VERSION, "path": str(path),
+        "mtime_ns": st.st_mtime_ns, "size": st.st_size,
+        "project": path.parent.name,
+        "first_ts": next((s["start_ts"] for s in segs if s["start_ts"]), None),
+        "by_label": {label: {"usage": agg["usage"], "cost_usd": agg["cost_usd"],
+                             "invocations": agg["invocations"]}
+                     for label, agg in data["by_label"].items()},
+        "total": {"usage": data["total"]["usage"],
+                  "cost_usd": data["total"]["cost_usd"]},
+    }
+
+
+def cached_summary(path, pricing):
+    import hashlib
+    cache_file = index_dir() / (hashlib.sha1(str(path).encode()).hexdigest() + ".json")
+    st = path.stat()
+    if cache_file.exists():
+        try:
+            c = json.loads(cache_file.read_text())
+            if (c.get("version") == INDEX_VERSION
+                    and c.get("mtime_ns") == st.st_mtime_ns and c.get("size") == st.st_size):
+                return c, True
+        except (json.JSONDecodeError, OSError):
+            pass
+    s = summarize_transcript(path, pricing, st)
+    cache_file.parent.mkdir(parents=True, exist_ok=True)
+    tmp = cache_file.with_suffix(".tmp")
+    tmp.write_text(json.dumps(s))
+    tmp.replace(cache_file)
+    return s, False
+
+
+def since_cutoff(arg):
+    """'7d' -> ISO instant 7 days ago; ISO strings pass through. None -> None."""
+    if not arg:
+        return None
+    m = re.fullmatch(r"(\d+)d", arg)
+    if m:
+        from datetime import datetime, timedelta, timezone
+        return (datetime.now(timezone.utc)
+                - timedelta(days=int(m.group(1)))).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return arg
+
+
+def _local_day(ts):
+    """ISO day of a session's first timestamp in LOCAL time ('unknown' if absent/unparseable)."""
+    if not ts:
+        return "unknown"
+    from datetime import datetime
+    try:
+        return datetime.fromisoformat(ts.replace("Z", "+00:00")).astimezone().date().isoformat()
+    except ValueError:
+        return ts[:10]
+
+
+def run_history(by="project", since=None):
+    pricing = load_pricing()
+    cutoff = since_cutoff(since)
+    rows = {}
+
+    def add_row(key, usage_dict, cost, calls):
+        r = rows.setdefault(key, {"key": key, "usage": empty_usage(),
+                                  "cost_usd": None, "calls": 0})
+        for k in r["usage"]:
+            r["usage"][k] += usage_dict.get(k, 0)
+        if cost is not None:
+            r["cost_usd"] = (r["cost_usd"] or 0.0) + cost
+        r["calls"] += calls
+
+    parsed = 0
+    files = sorted(projects_dir().glob("*/*.jsonl"))
+    for f in files:
+        try:
+            s, hit = cached_summary(f, pricing)
+        except OSError:
+            continue
+        if not hit:
+            parsed += 1
+            if parsed % 25 == 0:
+                print(f"token-usage: parsed {parsed} transcripts…", file=sys.stderr)
+        if cutoff and (s["first_ts"] or "") < cutoff:
+            continue
+        if by == "project":
+            add_row(s["project"], s["total"]["usage"], s["total"]["cost_usd"], 1)
+        elif by == "day":
+            add_row(_local_day(s["first_ts"]), s["total"]["usage"], s["total"]["cost_usd"], 1)
+        else:  # command
+            for label, agg in s["by_label"].items():
+                add_row(label, agg["usage"], agg["cost_usd"], agg["invocations"])
+
+    ordered = sorted(rows.values(), key=lambda r: (-(r["cost_usd"] or 0), r["key"]))
+    return {"by": by, "since": since, "rows": ordered}
+
+
+def render_history(data):
+    head = {"project": "Project", "day": "Day", "command": "Command"}[data["by"]]
+    lines = [f"| {head} | Calls | Output | Input | Cache read | Cache write | Est. cost |",
+             "|---|---:|---:|---:|---:|---:|---:|"]
+    total = empty_usage()
+    total_cost, calls = None, 0
+    for r in data["rows"]:
+        u = r["usage"]
+        lines.append(f"| {r['key']} | {r['calls']} | {fmt_tokens(u['output'])} | {fmt_tokens(u['input'])} "
+                     f"| {fmt_tokens(u['cache_read'])} | {fmt_tokens(u['cache_5m'] + u['cache_1h'])} "
+                     f"| {fmt_cost(r['cost_usd'])} |")
+        for k in total:
+            total[k] += u[k]
+        if r["cost_usd"] is not None:
+            total_cost = (total_cost or 0.0) + r["cost_usd"]
+        calls += r["calls"]
+    lines.append(f"| **Total** | **{calls}** | **{fmt_tokens(total['output'])}** | **{fmt_tokens(total['input'])}** "
+                 f"| **{fmt_tokens(total['cache_read'])}** | **{fmt_tokens(total['cache_5m'] + total['cache_1h'])}** "
+                 f"| **{fmt_cost(total_cost)}** |")
     return "\n".join(lines)
 
 
@@ -407,6 +627,24 @@ def run_hook():
         data["transcript_path"] = str(transcript)
         LEDGER_DIR.mkdir(parents=True, exist_ok=True)
         ledger = LEDGER_DIR / f"{session_id}.json"
+
+        prior_notified = False
+        if ledger.exists():
+            try:
+                prior = json.loads(ledger.read_text())
+                prior_notified = isinstance(prior, dict) and bool(prior.get("budget_notified"))
+            except (json.JSONDecodeError, OSError):
+                pass
+        limit = None
+        try:
+            limit = float(os.environ["TOKEN_USAGE_BUDGET_USD"])
+        except (KeyError, ValueError):
+            pass
+        cost = data["total"]["cost_usd"]
+        fire = (limit is not None and not prior_notified
+                and cost is not None and cost >= limit)
+        data["budget_notified"] = prior_notified or fire
+
         tmp = ledger.with_suffix(".tmp")
         tmp.write_text(json.dumps(data, indent=1))
         tmp.replace(ledger)
@@ -415,6 +653,15 @@ def run_hook():
             (LEDGER_DIR / "latest.json").symlink_to(ledger)
         except OSError:
             pass
+        if fire:
+            top = "—"
+            if data["by_label"]:
+                top = max(data["by_label"].items(),
+                          key=lambda kv: kv[1]["cost_usd"] or 0)[0]
+            print(json.dumps({"systemMessage":
+                f"token-usage: session estimate ${cost:.2f} has passed your "
+                f"${limit:.2f} budget — top consumer: {top}"}))
+
     except Exception:
         return 0  # a broken ledger update must never break the session
     return 0
@@ -426,18 +673,37 @@ def main():
     for name in ("report", "json"):
         p = sub.add_parser(name)
         p.add_argument("transcript", nargs="?", default=None)
+        if name == "report":
+            p.add_argument("--agents", action="store_true")
+        p.add_argument("--diff", nargs=2, metavar=("OLD", "NEW"), default=None)
     sub.add_parser("hook")
+    h = sub.add_parser("history")
+    h.add_argument("--by", choices=("project", "day", "command"), default="project")
+    h.add_argument("--since", default=None)
+    h.add_argument("--json", action="store_true", dest="as_json")
     args = ap.parse_args()
 
     if args.cmd == "hook":
         sys.exit(run_hook())
+    if args.cmd == "history":
+        data = run_history(by=args.by, since=args.since)
+        print(json.dumps(data, indent=1) if args.as_json else render_history(data))
+        return
+    if getattr(args, "diff", None):
+        if getattr(args, "transcript", None):
+            sys.exit("token-usage: --diff ignores TRANSCRIPT — pass exactly two paths to --diff")
+        if getattr(args, "agents", False):
+            sys.exit("token-usage: --diff and --agents cannot be combined")
+        d = diff_data(Path(args.diff[0]), Path(args.diff[1]), load_pricing())
+        print(json.dumps(d, indent=1) if args.cmd == "json" else render_diff(d))
+        return
     transcript = resolve_transcript(getattr(args, "transcript", None))
     data = aggregate(parse_session(transcript), load_pricing())
     data["transcript_path"] = str(transcript)
     if args.cmd == "json":
         print(json.dumps(data, indent=1))
     else:
-        print(render_report(data))
+        print(render_report(data, show_agents=getattr(args, "agents", False)))
 
 
 if __name__ == "__main__":
