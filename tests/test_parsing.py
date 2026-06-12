@@ -27,6 +27,12 @@ def test_entries_without_request_id_each_count(tu, tmp_path):
     assert by_model["claude-fable-5"]["requests"] == 2
 
 
+def test_rates_for_picks_longest_prefix(tu):
+    pricing = {"claude-opus-4": {"input": 15.0, "output": 75.0},
+               "claude-opus-4-5": {"input": 5.0, "output": 25.0}}
+    assert tu.rates_for("claude-opus-4-5-20250929", pricing) == pricing["claude-opus-4-5"]
+
+
 def test_rates_for_provider_prefixed_ids(tu):
     pricing = {"claude-opus-4-8": {"input": 5.0, "output": 25.0}}
     for model in (

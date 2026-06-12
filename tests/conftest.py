@@ -1,13 +1,13 @@
 """Shared fixtures: load the script as a module + synthetic transcript builders."""
 import importlib.util
 import json
-import sys
 from pathlib import Path
 
 import pytest
 
 SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "token_usage.py"
 
+# Loaded once at collection. Module-level constants (e.g. LEDGER_DIR) bind at import — in-process tests must monkeypatch module attributes, not env vars.
 _spec = importlib.util.spec_from_file_location("token_usage", SCRIPT)
 _tu = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_tu)
