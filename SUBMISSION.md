@@ -68,3 +68,33 @@ estimates for subscription users.
   requests), plus headless verification via `claude -p --plugin-dir`.
 
 **License:** MIT (LICENSE file in repo)
+
+**Documentation link:**
+https://app.notion.com/p/wickedsick/token-usage-Claude-Code-plugin-documentation-37d4ce0f44518186a1a6c3a8b1f32c21
+(long-form docs under the public "Discovery, Guides and Interesting Finds"
+area — verify in a private browser window before submitting; the GitHub
+README https://github.com/WizzoUK2/token-usage#readme is the canonical
+fallback.)
+
+**Example use cases:**
+
+1. **"Where did my tokens go this session?"** — at the end of a long session,
+   run `/token-usage:report` (or ask in natural language) and get a
+   per-command table: instantly see the code review consumed 6× everything
+   else combined.
+2. **Deciding whether a heavy workflow is worth it** — multi-agent commands
+   (deep code reviews, research fan-outs) are powerful but expensive.
+   token-usage shows their true deduped, cache-aware cost, so "run on every
+   PR" vs "reserve for releases" is decided with real numbers.
+3. **Profiling slash commands and skills you author** — plugin developers see
+   exactly what each invocation costs (cache-write amplification, subagent
+   fan-out included) and can compare before/after when optimising prompts.
+4. **Live cost awareness while you work** — the optional statusline segment
+   renders `⏶ 214k out · $33.87 · top: /code-review`, updated every turn
+   from the live ledger.
+5. **Auditing a past or headless session** — the standalone CLI analyses any
+   transcript outside Claude Code, with JSON output for dashboards or CI
+   cost tracking of `claude -p` automation.
+6. **Sanity-checking subagent-heavy sessions** — dozens of agents is exactly
+   where naive counting fails (~2.5× overcount); the `requestId` dedup is
+   validated on a 15-subagent session with 1,000+ deduped requests.
