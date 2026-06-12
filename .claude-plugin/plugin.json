@@ -1,6 +1,6 @@
 {
   "name": "token-usage",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Attribute Claude Code token usage to the work that consumed it — per-slash-command breakdowns, live session ledger, and cost estimates",
   "author": {
     "name": "Craig Fletcher",

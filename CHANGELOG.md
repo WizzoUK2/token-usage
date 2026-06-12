@@ -6,6 +6,22 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.1.1] — 2026-06-12
+
+### Changed
+
+- Dedup hardened: streamed duplicates of one `requestId` now merge by
+  per-field **maxima** instead of first-seen-wins, so partial usage
+  snapshots can no longer undercount a request.
+- Model pricing resolves provider-prefixed IDs: Bedrock
+  (`us.anthropic.claude-…`) and OpenRouter/LiteLLM (`anthropic/claude-…`)
+  formats map to the bundled rate table.
+
+### Added
+
+- Reports show estimated **prompt-caching savings** ("Prompt caching saved
+  ~$X vs. full input rates"); `json` output gains `total.cache_savings_usd`.
+
 ## [0.1.0] — 2026-06-10
 
 Initial release.
@@ -27,5 +43,6 @@ Initial release.
 - Standalone CLI: `python3 scripts/token_usage.py report|json [transcript]`.
 - Optional statusline example (`examples/statusline.sh`, requires `jq`).
 
-[Unreleased]: https://github.com/WizzoUK2/token-usage/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/WizzoUK2/token-usage/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/WizzoUK2/token-usage/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/WizzoUK2/token-usage/releases/tag/v0.1.0
