@@ -454,6 +454,127 @@ def render_diff(d):
     return "\n".join(lines)
 
 
+INDEX_VERSION = 1
+
+
+def projects_dir():
+    return Path(os.environ.get("TOKEN_USAGE_PROJECTS_DIR",
+                               Path.home() / ".claude" / "projects"))
+
+
+def index_dir():
+    return Path(os.environ.get("TOKEN_USAGE_LEDGER_DIR",
+                               Path.home() / ".cache" / "token-usage")) / "index"
+
+
+def summarize_transcript(path, pricing):
+    segs = parse_session(path)
+    data = aggregate(segs, pricing)
+    st = path.stat()
+    return {
+        "version": INDEX_VERSION, "path": str(path),
+        "mtime": st.st_mtime, "size": st.st_size,
+        "project": path.parent.name,
+        "first_ts": next((s["start_ts"] for s in segs if s["start_ts"]), None),
+        "by_label": {label: {"usage": agg["usage"], "cost_usd": agg["cost_usd"],
+                             "invocations": agg["invocations"]}
+                     for label, agg in data["by_label"].items()},
+        "total": {"usage": data["total"]["usage"],
+                  "cost_usd": data["total"]["cost_usd"]},
+    }
+
+
+def cached_summary(path, pricing):
+    import hashlib
+    cache_file = index_dir() / (hashlib.sha1(str(path).encode()).hexdigest() + ".json")
+    st = path.stat()
+    if cache_file.exists():
+        try:
+            c = json.loads(cache_file.read_text())
+            if (c.get("version") == INDEX_VERSION
+                    and c.get("mtime") == st.st_mtime and c.get("size") == st.st_size):
+                return c, True
+        except (json.JSONDecodeError, OSError):
+            pass
+    s = summarize_transcript(path, pricing)
+    cache_file.parent.mkdir(parents=True, exist_ok=True)
+    tmp = cache_file.with_suffix(".tmp")
+    tmp.write_text(json.dumps(s))
+    tmp.replace(cache_file)
+    return s, False
+
+
+def since_cutoff(arg):
+    """'7d' -> ISO instant 7 days ago; ISO strings pass through. None -> None."""
+    if not arg:
+        return None
+    m = re.fullmatch(r"(\d+)d", arg)
+    if m:
+        from datetime import datetime, timedelta, timezone
+        return (datetime.now(timezone.utc)
+                - timedelta(days=int(m.group(1)))).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return arg
+
+
+def run_history(by="project", since=None, as_json=False):
+    pricing = load_pricing()
+    cutoff = since_cutoff(since)
+    rows = {}
+
+    def add_row(key, usage_dict, cost, calls):
+        r = rows.setdefault(key, {"key": key, "usage": empty_usage(),
+                                  "cost_usd": None, "calls": 0})
+        for k in r["usage"]:
+            r["usage"][k] += usage_dict.get(k, 0)
+        if cost is not None:
+            r["cost_usd"] = (r["cost_usd"] or 0.0) + cost
+        r["calls"] += calls
+
+    files = sorted(projects_dir().glob("*/*.jsonl"))
+    for n, f in enumerate(files, 1):
+        if n % 25 == 0:
+            print(f"token-usage: scanned {n}/{len(files)} transcripts…", file=sys.stderr)
+        try:
+            s, _ = cached_summary(f, pricing)
+        except OSError:
+            continue
+        if cutoff and (s["first_ts"] or "") < cutoff:
+            continue
+        if by == "project":
+            add_row(s["project"], s["total"]["usage"], s["total"]["cost_usd"], 1)
+        elif by == "day":
+            add_row((s["first_ts"] or "unknown")[:10],
+                    s["total"]["usage"], s["total"]["cost_usd"], 1)
+        else:  # command
+            for label, agg in s["by_label"].items():
+                add_row(label, agg["usage"], agg["cost_usd"], agg["invocations"])
+
+    ordered = sorted(rows.values(), key=lambda r: (-(r["cost_usd"] or 0), r["key"]))
+    return {"by": by, "since": since, "rows": ordered}
+
+
+def render_history(data):
+    head = {"project": "Project", "day": "Day", "command": "Command"}[data["by"]]
+    lines = [f"| {head} | Calls | Output | Input | Cache read | Cache write | Est. cost |",
+             "|---|---:|---:|---:|---:|---:|---:|"]
+    total = empty_usage()
+    total_cost, calls = None, 0
+    for r in data["rows"]:
+        u = r["usage"]
+        lines.append(f"| {r['key']} | {r['calls']} | {fmt_tokens(u['output'])} | {fmt_tokens(u['input'])} "
+                     f"| {fmt_tokens(u['cache_read'])} | {fmt_tokens(u['cache_5m'] + u['cache_1h'])} "
+                     f"| {fmt_cost(r['cost_usd'])} |")
+        for k in total:
+            total[k] += u[k]
+        if r["cost_usd"] is not None:
+            total_cost = (total_cost or 0.0) + r["cost_usd"]
+        calls += r["calls"]
+    lines.append(f"| **Total** | **{calls}** | **{fmt_tokens(total['output'])}** | **{fmt_tokens(total['input'])}** "
+                 f"| **{fmt_tokens(total['cache_read'])}** | **{fmt_tokens(total['cache_5m'] + total['cache_1h'])}** "
+                 f"| **{fmt_cost(total_cost)}** |")
+    return "\n".join(lines)
+
+
 def find_latest_transcript():
     # Claude Code slugs project paths by replacing /, ., and _ with dashes.
     slug = re.sub(r"[/._]", "-", str(Path.cwd()))
@@ -541,10 +662,18 @@ def main():
             p.add_argument("--agents", action="store_true")
         p.add_argument("--diff", nargs=2, metavar=("OLD", "NEW"), default=None)
     sub.add_parser("hook")
+    h = sub.add_parser("history")
+    h.add_argument("--by", choices=("project", "day", "command"), default="project")
+    h.add_argument("--since", default=None)
+    h.add_argument("--json", action="store_true", dest="as_json")
     args = ap.parse_args()
 
     if args.cmd == "hook":
         sys.exit(run_hook())
+    if args.cmd == "history":
+        data = run_history(by=args.by, since=args.since, as_json=args.as_json)
+        print(json.dumps(data, indent=1) if args.as_json else render_history(data))
+        return
     if getattr(args, "diff", None):
         if getattr(args, "transcript", None):
             sys.exit("token-usage: --diff ignores TRANSCRIPT — pass exactly two paths to --diff")
