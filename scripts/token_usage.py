@@ -467,13 +467,15 @@ def index_dir():
                                Path.home() / ".cache" / "token-usage")) / "index"
 
 
-def summarize_transcript(path, pricing):
+def summarize_transcript(path, pricing, st=None):
+    # Stat BEFORE parsing: if the transcript is appended mid-parse, the recorded
+    # mtime is then stale and the next run re-parses — never a silently stale cache.
+    st = st or path.stat()
     segs = parse_session(path)
     data = aggregate(segs, pricing)
-    st = path.stat()
     return {
         "version": INDEX_VERSION, "path": str(path),
-        "mtime": st.st_mtime, "size": st.st_size,
+        "mtime_ns": st.st_mtime_ns, "size": st.st_size,
         "project": path.parent.name,
         "first_ts": next((s["start_ts"] for s in segs if s["start_ts"]), None),
         "by_label": {label: {"usage": agg["usage"], "cost_usd": agg["cost_usd"],
@@ -492,11 +494,11 @@ def cached_summary(path, pricing):
         try:
             c = json.loads(cache_file.read_text())
             if (c.get("version") == INDEX_VERSION
-                    and c.get("mtime") == st.st_mtime and c.get("size") == st.st_size):
+                    and c.get("mtime_ns") == st.st_mtime_ns and c.get("size") == st.st_size):
                 return c, True
         except (json.JSONDecodeError, OSError):
             pass
-    s = summarize_transcript(path, pricing)
+    s = summarize_transcript(path, pricing, st)
     cache_file.parent.mkdir(parents=True, exist_ok=True)
     tmp = cache_file.with_suffix(".tmp")
     tmp.write_text(json.dumps(s))
@@ -516,7 +518,18 @@ def since_cutoff(arg):
     return arg
 
 
-def run_history(by="project", since=None, as_json=False):
+def _local_day(ts):
+    """ISO day of a session's first timestamp in LOCAL time ('unknown' if absent/unparseable)."""
+    if not ts:
+        return "unknown"
+    from datetime import datetime
+    try:
+        return datetime.fromisoformat(ts.replace("Z", "+00:00")).astimezone().date().isoformat()
+    except ValueError:
+        return ts[:10]
+
+
+def run_history(by="project", since=None):
     pricing = load_pricing()
     cutoff = since_cutoff(since)
     rows = {}
@@ -530,21 +543,23 @@ def run_history(by="project", since=None, as_json=False):
             r["cost_usd"] = (r["cost_usd"] or 0.0) + cost
         r["calls"] += calls
 
+    parsed = 0
     files = sorted(projects_dir().glob("*/*.jsonl"))
-    for n, f in enumerate(files, 1):
-        if n % 25 == 0:
-            print(f"token-usage: scanned {n}/{len(files)} transcripts…", file=sys.stderr)
+    for f in files:
         try:
-            s, _ = cached_summary(f, pricing)
+            s, hit = cached_summary(f, pricing)
         except OSError:
             continue
+        if not hit:
+            parsed += 1
+            if parsed % 25 == 0:
+                print(f"token-usage: parsed {parsed} transcripts…", file=sys.stderr)
         if cutoff and (s["first_ts"] or "") < cutoff:
             continue
         if by == "project":
             add_row(s["project"], s["total"]["usage"], s["total"]["cost_usd"], 1)
         elif by == "day":
-            add_row((s["first_ts"] or "unknown")[:10],
-                    s["total"]["usage"], s["total"]["cost_usd"], 1)
+            add_row(_local_day(s["first_ts"]), s["total"]["usage"], s["total"]["cost_usd"], 1)
         else:  # command
             for label, agg in s["by_label"].items():
                 add_row(label, agg["usage"], agg["cost_usd"], agg["invocations"])
@@ -671,7 +686,7 @@ def main():
     if args.cmd == "hook":
         sys.exit(run_hook())
     if args.cmd == "history":
-        data = run_history(by=args.by, since=args.since, as_json=args.as_json)
+        data = run_history(by=args.by, since=args.since)
         print(json.dumps(data, indent=1) if args.as_json else render_history(data))
         return
     if getattr(args, "diff", None):
