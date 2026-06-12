@@ -70,9 +70,7 @@ estimates for subscription users.
 **License:** MIT (LICENSE file in repo)
 
 **Documentation link:**
-https://app.notion.com/p/wickedsick/token-usage-Claude-Code-plugin-documentation-37d4ce0f44518186a1a6c3a8b1f32c21
-(long-form docs under the public "Discovery, Guides and Interesting Finds"
-area — verify in a private browser window before submitting; the GitHub
+https://discovery.wickedsick.com/token-usage-claude-code-plugin-documentation
 README https://github.com/WizzoUK2/token-usage#readme is the canonical
 fallback.)
 
