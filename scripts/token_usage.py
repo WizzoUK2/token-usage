@@ -362,6 +362,12 @@ def fmt_cost(c):
     return f"${c:.2f}" if c is not None else "—"
 
 
+def fmt_cost_delta(c):
+    if c is None:
+        return "—"
+    return f"{'-' if c < 0 else '+'}${abs(c):.2f}"
+
+
 def render_report(data, show_agents=False):
     lines = [
         "| Activity | Calls | Output | Input | Cache read | Cache write | Est. cost |",
@@ -411,17 +417,21 @@ def diff_data(old_path, new_path, pricing):
     a = aggregate(parse_session(old_path), pricing)
     b = aggregate(parse_session(new_path), pricing)
     rows = []
-    for label in set(a["by_label"]) | set(b["by_label"]):
+    for label in sorted(set(a["by_label"]) | set(b["by_label"])):
         ra, rb = a["by_label"].get(label), b["by_label"].get(label)
         ca = ra["cost_usd"] if ra else None
         cb = rb["cost_usd"] if rb else None
         oa = ra["usage"]["output"] if ra else 0
         ob = rb["usage"]["output"] if rb else 0
+        # Absent on a side genuinely means $0 spent there; present-but-unpriceable
+        # means unknown — a delta against unknown is itself unknown.
+        unpriceable = (ra is not None and ca is None) or (rb is not None and cb is None)
+        delta_cost = None if unpriceable else (cb if rb else 0.0) - (ca if ra else 0.0)
         rows.append({"label": label, "a_cost": ca, "b_cost": cb,
                      "a_output": oa, "b_output": ob,
-                     "delta_cost": (cb or 0.0) - (ca or 0.0),
+                     "delta_cost": delta_cost,
                      "delta_output": ob - oa})
-    rows.sort(key=lambda r: -abs(r["delta_cost"]))
+    rows.sort(key=lambda r: (-abs(r["delta_cost"] or 0.0), r["label"]))
     return {"a_total": a["total"], "b_total": b["total"], "rows": rows}
 
 
@@ -432,13 +442,15 @@ def render_diff(d):
         name = r["label"] if r["label"] == OTHER_LABEL else f"`{r['label']}`"
         sign = "+" if r["delta_output"] >= 0 else "-"
         lines.append(f"| {name} | {fmt_cost(r['a_cost'])} | {fmt_cost(r['b_cost'])} "
-                     f"| {fmt_cost(r['delta_cost'])} | {sign}{fmt_tokens(abs(r['delta_output']))} |")
+                     f"| {fmt_cost_delta(r['delta_cost'])} | {sign}{fmt_tokens(abs(r['delta_output']))} |")
     ta, tb = d["a_total"], d["b_total"]
-    dt = (tb["cost_usd"] or 0.0) - (ta["cost_usd"] or 0.0)
+    dt = None
+    if ta["cost_usd"] is not None and tb["cost_usd"] is not None:
+        dt = tb["cost_usd"] - ta["cost_usd"]
     do = tb["usage"]["output"] - ta["usage"]["output"]
     sign = "+" if do >= 0 else "-"
     lines.append(f"| **Total** | **{fmt_cost(ta['cost_usd'])}** | **{fmt_cost(tb['cost_usd'])}** "
-                 f"| **{fmt_cost(dt)}** | **{sign}{fmt_tokens(abs(do))}** |")
+                 f"| **{fmt_cost_delta(dt)}** | **{sign}{fmt_tokens(abs(do))}** |")
     return "\n".join(lines)
 
 
@@ -534,6 +546,8 @@ def main():
     if args.cmd == "hook":
         sys.exit(run_hook())
     if getattr(args, "diff", None):
+        if getattr(args, "transcript", None):
+            sys.exit("token-usage: --diff ignores TRANSCRIPT — pass exactly two paths to --diff")
         if getattr(args, "agents", False):
             sys.exit("token-usage: --diff and --agents cannot be combined")
         d = diff_data(Path(args.diff[0]), Path(args.diff[1]), load_pricing())
