@@ -114,7 +114,7 @@ Claude Code writes every session to `~/.claude/projects/<project-slug>/<session-
 
 The Stop hook (`hooks/hooks.json`) re-runs this after every turn and writes the result to `~/.cache/token-usage/<session-id>.json` (override the directory with `TOKEN_USAGE_LEDGER_DIR`). Hook failures never block the session.
 
-The `history` subcommand builds an incremental index under `~/.cache/token-usage/index/`, keyed by file identity (inode + mtime + size). Transcripts are only re-parsed when their content changes; subsequent scans skip unchanged files and complete in milliseconds.
+The `history` subcommand builds an incremental index under `~/.cache/token-usage/index/`, keyed by file path and re-validated by (mtime, size). Transcripts are only re-parsed when their content changes; subsequent scans skip unchanged files and complete in milliseconds.
 
 ## Cost disclaimer
 
