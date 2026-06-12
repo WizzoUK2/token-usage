@@ -17,8 +17,8 @@ Claude Code tells you session totals (`/cost`, OTel metrics) and tools like ccus
 
 - **Per-command attribution** — every turn started by a slash command is attributed to that command; everything else lands in `(no command)`. Totals always reconcile.
 - **Subagent rollup** — agents spawned during a command (sidechains under `<session>/subagents/`) count toward the command that spawned them, labelled `(+N agents)`.
-- **Correct dedup** — Claude Code writes the same API request's usage to multiple transcript entries while streaming. token-usage dedups by `requestId`; a naive sum overcounts ~2.5×.
-- **Cache-aware cost estimates** — per-model pricing with cache reads at 0.1×, 5-minute cache writes at 1.25×, and 1-hour cache writes at 2× the input rate. Mixed-model sessions (e.g. Opus main loop + Haiku subagents) are priced per model.
+- **Correct dedup** — Claude Code writes the same API request's usage to multiple transcript entries while streaming. token-usage dedups by `requestId`, keeping per-field maxima across duplicates (robust to partial snapshots); a naive sum overcounts ~2.5×.
+- **Cache-aware cost estimates** — per-model pricing with cache reads at 0.1×, 5-minute cache writes at 1.25×, and 1-hour cache writes at 2× the input rate. Mixed-model sessions (e.g. Opus main loop + Haiku subagents) are priced per model, and reports show what prompt caching saved you. Bedrock (`us.anthropic.…`) and OpenRouter-style (`anthropic/…`) model IDs resolve too.
 - **Live ledger** — a Stop hook keeps `~/.cache/token-usage/<session-id>.json` current after every turn, so reports are instant and a statusline can show running cost.
 
 ## Installation

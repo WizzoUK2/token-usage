@@ -2,9 +2,10 @@
 """token-usage — attribute Claude Code token usage to the work that consumed it.
 
 Parses Claude Code session transcripts (~/.claude/projects/<project>/<session>.jsonl),
-deduplicates streamed usage entries by requestId, segments the session by slash-command
-invocations, rolls subagent transcripts up into the segment that spawned them, and
-prices the result against a bundled pricing table.
+deduplicates streamed usage entries by requestId (taking per-field maxima, since
+streamed duplicates may carry partial usage snapshots), segments the session by
+slash-command invocations, rolls subagent transcripts up into the segment that
+spawned them, and prices the result against a bundled pricing table.
 
 Subcommands:
     report [TRANSCRIPT]   Markdown breakdown table (default: latest session in cwd project)
@@ -55,13 +56,23 @@ def load_pricing():
     return DEFAULT_PRICING
 
 
+# Bedrock-style IDs prepend an optional region and "anthropic." (us.anthropic.claude-...).
+PROVIDER_PREFIX_RE = re.compile(r"^(?:[a-z]{2,3}\.)?anthropic\.")
+
+
 def rates_for(model, pricing):
     if not model:
         return None
+    candidates = [model]
+    if "/" in model:  # OpenRouter/LiteLLM-style "anthropic/claude-..."
+        candidates.append(model.rsplit("/", 1)[1])
+    candidates += [s for c in list(candidates)
+                   if (s := PROVIDER_PREFIX_RE.sub("", c)) != c]
     best = None
-    for key in pricing:
-        if model.startswith(key) and (best is None or len(key) > len(best)):
-            best = key
+    for cand in candidates:
+        for key in pricing:
+            if cand.startswith(key) and (best is None or len(key) > len(best)):
+                best = key
     return pricing.get(best) if best else None
 
 
@@ -69,10 +80,8 @@ def empty_usage():
     return {"input": 0, "output": 0, "cache_read": 0, "cache_5m": 0, "cache_1h": 0, "requests": 0}
 
 
-def add_usage(bucket, usage):
-    bucket["input"] += usage.get("input_tokens") or 0
-    bucket["output"] += usage.get("output_tokens") or 0
-    bucket["cache_read"] += usage.get("cache_read_input_tokens") or 0
+def normalize_usage(usage):
+    """Flatten an API usage dict to the bucket fields (without the request count)."""
     cc = usage.get("cache_creation") or {}
     five_m = cc.get("ephemeral_5m_input_tokens")
     one_h = cc.get("ephemeral_1h_input_tokens")
@@ -80,9 +89,25 @@ def add_usage(bucket, usage):
         # Older transcripts: only the flat total exists; assume 5m TTL.
         five_m = usage.get("cache_creation_input_tokens") or 0
         one_h = 0
-    bucket["cache_5m"] += five_m or 0
-    bucket["cache_1h"] += one_h or 0
+    return {
+        "input": usage.get("input_tokens") or 0,
+        "output": usage.get("output_tokens") or 0,
+        "cache_read": usage.get("cache_read_input_tokens") or 0,
+        "cache_5m": five_m or 0,
+        "cache_1h": one_h or 0,
+    }
+
+
+def add_flat(bucket, flat):
+    for k, v in flat.items():
+        bucket[k] += v
     bucket["requests"] += 1
+
+
+def max_flat(dest, flat):
+    # Streamed duplicates of one request may carry partial snapshots; keep the maxima.
+    for k, v in flat.items():
+        dest[k] = max(dest[k], v)
 
 
 def cost_usd(by_model, pricing):
@@ -101,6 +126,18 @@ def cost_usd(by_model, pricing):
             + bucket["cache_5m"] * inp * CACHE_5M_MULT
             + bucket["cache_1h"] * inp * CACHE_1H_MULT
         )
+    return total if priced else None
+
+
+def cache_savings_usd(by_model, pricing):
+    """USD saved by cache reads being billed at 0.1x instead of the full input rate."""
+    total, priced = 0.0, False
+    for model, bucket in by_model.items():
+        rates = rates_for(model, pricing)
+        if not rates:
+            continue
+        priced = True
+        total += bucket["cache_read"] * rates["input"] / 1e6 * (1 - CACHE_READ_MULT)
     return total if priced else None
 
 
@@ -156,23 +193,26 @@ def iter_jsonl(path):
 
 def sum_transcript(path):
     """Sum usage in one transcript file, deduped by requestId. Returns (by_model, first_ts)."""
-    by_model, seen, first_ts = {}, set(), None
+    by_model, pending, first_ts = {}, {}, None  # pending: requestId -> (model, flat maxima)
     for entry in iter_jsonl(path):
         if first_ts is None and entry.get("timestamp"):
             first_ts = entry["timestamp"]
         if entry.get("type") != "assistant":
             continue
-        req = entry.get("requestId")
-        if req and req in seen:
-            continue
-        if req:
-            seen.add(req)
         msg = entry.get("message") or {}
         usage = msg.get("usage")
         if not usage:
             continue
-        bucket = by_model.setdefault(msg.get("model") or "unknown", empty_usage())
-        add_usage(bucket, usage)
+        flat = normalize_usage(usage)
+        req = entry.get("requestId")
+        if not req:
+            add_flat(by_model.setdefault(msg.get("model") or "unknown", empty_usage()), flat)
+        elif req in pending:
+            max_flat(pending[req][1], flat)
+        else:
+            pending[req] = (msg.get("model") or "unknown", flat)
+    for model, flat in pending.values():
+        add_flat(by_model.setdefault(model, empty_usage()), flat)
     return by_model, first_ts
 
 
@@ -186,7 +226,7 @@ def parse_session(transcript_path):
             "prompt": prompt.strip()[:120], "subagents": [],
         })
 
-    seen_requests = set()
+    pending = {}  # requestId -> (segment, model, flat maxima); segment = first occurrence's
     for entry in iter_jsonl(transcript_path):
         if is_user_prompt(entry):
             text = text_of((entry.get("message") or {}).get("content"))
@@ -196,20 +236,25 @@ def parse_session(transcript_path):
             continue
         if entry.get("type") != "assistant":
             continue
-        req = entry.get("requestId")
-        if req and req in seen_requests:
-            continue
-        if req:
-            seen_requests.add(req)
         msg = entry.get("message") or {}
         usage = msg.get("usage")
         if not usage:
             continue
+        flat = normalize_usage(usage)
+        req = entry.get("requestId")
+        if req and req in pending:
+            max_flat(pending[req][2], flat)
+            continue
         if not segments:
             new_segment(OTHER_LABEL, entry.get("timestamp"))
         seg = segments[-1]
-        bucket = seg["by_model"].setdefault(msg.get("model") or "unknown", empty_usage())
-        add_usage(bucket, usage)
+        model = msg.get("model") or "unknown"
+        if req:
+            pending[req] = (seg, model, flat)
+        else:
+            add_flat(seg["by_model"].setdefault(model, empty_usage()), flat)
+    for seg, model, flat in pending.values():
+        add_flat(seg["by_model"].setdefault(model, empty_usage()), flat)
 
     # Roll up subagent transcripts into the segment active when each agent started.
     subagents_dir = transcript_path.parent / transcript_path.stem / "subagents"
@@ -265,6 +310,7 @@ def aggregate(segments, pricing):
         "total": {
             "usage": sum_buckets(total_by_model),
             "cost_usd": cost_usd(total_by_model, pricing),
+            "cache_savings_usd": cache_savings_usd(total_by_model, pricing),
             "models": sorted(total_by_model),
         },
         "segments": [
@@ -316,6 +362,9 @@ def render_report(data):
     )
     models = ", ".join(sorted(t["models"]))
     lines.append("")
+    savings = t.get("cache_savings_usd")
+    if savings is not None and savings >= 0.01:
+        lines.append(f"Prompt caching saved ~{fmt_cost(savings)} vs. full input rates.")
     lines.append(f"Models: {models}. Cost is an API-price estimate (cache-aware); "
                  "subscription plans are not billed per token.")
     return "\n".join(lines)
