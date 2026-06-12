@@ -406,6 +406,42 @@ def render_report(data, show_agents=False):
     return "\n".join(lines)
 
 
+def diff_data(old_path, new_path, pricing):
+    """Compare two transcripts label-by-label. Rows ordered by |Δ cost| desc."""
+    a = aggregate(parse_session(old_path), pricing)
+    b = aggregate(parse_session(new_path), pricing)
+    rows = []
+    for label in set(a["by_label"]) | set(b["by_label"]):
+        ra, rb = a["by_label"].get(label), b["by_label"].get(label)
+        ca = ra["cost_usd"] if ra else None
+        cb = rb["cost_usd"] if rb else None
+        oa = ra["usage"]["output"] if ra else 0
+        ob = rb["usage"]["output"] if rb else 0
+        rows.append({"label": label, "a_cost": ca, "b_cost": cb,
+                     "a_output": oa, "b_output": ob,
+                     "delta_cost": (cb or 0.0) - (ca or 0.0),
+                     "delta_output": ob - oa})
+    rows.sort(key=lambda r: -abs(r["delta_cost"]))
+    return {"a_total": a["total"], "b_total": b["total"], "rows": rows}
+
+
+def render_diff(d):
+    lines = ["| Activity | A cost | B cost | Δ cost | Δ output |",
+             "|---|---:|---:|---:|---:|"]
+    for r in d["rows"]:
+        name = r["label"] if r["label"] == OTHER_LABEL else f"`{r['label']}`"
+        sign = "+" if r["delta_output"] >= 0 else "-"
+        lines.append(f"| {name} | {fmt_cost(r['a_cost'])} | {fmt_cost(r['b_cost'])} "
+                     f"| {fmt_cost(r['delta_cost'])} | {sign}{fmt_tokens(abs(r['delta_output']))} |")
+    ta, tb = d["a_total"], d["b_total"]
+    dt = (tb["cost_usd"] or 0.0) - (ta["cost_usd"] or 0.0)
+    do = tb["usage"]["output"] - ta["usage"]["output"]
+    sign = "+" if do >= 0 else "-"
+    lines.append(f"| **Total** | **{fmt_cost(ta['cost_usd'])}** | **{fmt_cost(tb['cost_usd'])}** "
+                 f"| **{fmt_cost(dt)}** | **{sign}{fmt_tokens(abs(do))}** |")
+    return "\n".join(lines)
+
+
 def find_latest_transcript():
     # Claude Code slugs project paths by replacing /, ., and _ with dashes.
     slug = re.sub(r"[/._]", "-", str(Path.cwd()))
@@ -491,11 +527,18 @@ def main():
         p.add_argument("transcript", nargs="?", default=None)
         if name == "report":
             p.add_argument("--agents", action="store_true")
+        p.add_argument("--diff", nargs=2, metavar=("OLD", "NEW"), default=None)
     sub.add_parser("hook")
     args = ap.parse_args()
 
     if args.cmd == "hook":
         sys.exit(run_hook())
+    if getattr(args, "diff", None):
+        if getattr(args, "agents", False):
+            sys.exit("token-usage: --diff and --agents cannot be combined")
+        d = diff_data(Path(args.diff[0]), Path(args.diff[1]), load_pricing())
+        print(json.dumps(d, indent=1) if args.cmd == "json" else render_diff(d))
+        return
     transcript = resolve_transcript(getattr(args, "transcript", None))
     data = aggregate(parse_session(transcript), load_pricing())
     data["transcript_path"] = str(transcript)
