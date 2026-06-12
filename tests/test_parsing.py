@@ -66,3 +66,33 @@ def test_totals_reconcile_with_segments(tu, tmp_path):
     data = tu.aggregate(tu.parse_session(t), tu.load_pricing())
     seg_sum = sum(s["usage"]["output"] for s in data["segments"])
     assert seg_sum == data["total"]["usage"]["output"] == 30
+
+
+def test_command_owns_followup_turns(tu, tmp_path):
+    t = write_jsonl(tmp_path / "s.jsonl", [
+        user("2026-06-12T10:00:00Z", command="/code-review"),
+        assistant("2026-06-12T10:00:01Z", usage(out=100), request_id="r1"),
+        user("2026-06-12T10:05:00Z", text="yes, fix that"),          # follow-up
+        assistant("2026-06-12T10:05:01Z", usage(out=50), request_id="r2"),
+        user("2026-06-12T10:10:00Z", command="/commit"),             # next command
+        assistant("2026-06-12T10:10:01Z", usage(out=10), request_id="r3"),
+    ])
+    data = tu.aggregate(tu.parse_session(t), tu.load_pricing())
+    assert data["by_label"]["/code-review"]["usage"]["output"] == 150
+    assert data["by_label"]["/commit"]["usage"]["output"] == 10
+    assert tu.OTHER_LABEL not in data["by_label"]
+
+
+def test_no_command_only_before_first_command(tu, tmp_path):
+    t = write_jsonl(tmp_path / "s.jsonl", [
+        user("2026-06-12T10:00:00Z", text="hi"),
+        assistant("2026-06-12T10:00:01Z", usage(out=5), request_id="r1"),
+        user("2026-06-12T10:01:00Z", text="more"),                   # still pre-command
+        assistant("2026-06-12T10:01:01Z", usage(out=5), request_id="r2"),
+        user("2026-06-12T10:02:00Z", command="/commit"),
+        assistant("2026-06-12T10:02:01Z", usage(out=10), request_id="r3"),
+    ])
+    data = tu.aggregate(tu.parse_session(t), tu.load_pricing())
+    assert data["by_label"][tu.OTHER_LABEL]["usage"]["output"] == 10
+    assert data["by_label"][tu.OTHER_LABEL]["invocations"] == 1      # ONE sticky segment
+    assert data["by_label"]["/commit"]["usage"]["output"] == 10

@@ -3,8 +3,8 @@
 
 Parses Claude Code session transcripts (~/.claude/projects/<project>/<session>.jsonl),
 deduplicates streamed usage entries by requestId (taking per-field maxima, since
-streamed duplicates may carry partial usage snapshots), segments the session by
-slash-command invocations, rolls subagent transcripts up into the segment that
+streamed duplicates may carry partial usage snapshots), segments the session at
+slash-command invocations (a command owns all turns until the next command), rolls subagent transcripts up into the segment that
 spawned them, and prices the result against a bundled pricing table.
 
 Subcommands:
@@ -231,8 +231,13 @@ def parse_session(transcript_path):
         if is_user_prompt(entry):
             text = text_of((entry.get("message") or {}).get("content"))
             m = COMMAND_RE.search(text)
-            label = m.group(1).strip() if m else OTHER_LABEL
-            new_segment(label, entry.get("timestamp"), "" if m else text)
+            if m:
+                # A command always starts a new segment...
+                new_segment(m.group(1).strip(), entry.get("timestamp"))
+            elif not segments:
+                # ...but a plain prompt only starts the one pre-command segment;
+                # otherwise the active segment keeps ownership (sticky attribution).
+                new_segment(OTHER_LABEL, entry.get("timestamp"), text)
             continue
         if entry.get("type") != "assistant":
             continue
