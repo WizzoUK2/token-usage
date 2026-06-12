@@ -4,8 +4,9 @@
 Parses Claude Code session transcripts (~/.claude/projects/<project>/<session>.jsonl),
 deduplicates streamed usage entries by requestId (taking per-field maxima, since
 streamed duplicates may carry partial usage snapshots), segments the session at
-slash-command invocations (a command owns all turns until the next command), rolls subagent transcripts up into the segment that
-spawned them, and prices the result against a bundled pricing table.
+slash-command invocations (a command owns all turns until the next command),
+rolls subagent transcripts up into the segment that spawned them, and prices
+the result against a bundled pricing table.
 
 Subcommands:
     report [TRANSCRIPT]   Markdown breakdown table (default: latest session in cwd project)
@@ -238,6 +239,8 @@ def parse_session(transcript_path):
                 # ...but a plain prompt only starts the one pre-command segment;
                 # otherwise the active segment keeps ownership (sticky attribution).
                 new_segment(OTHER_LABEL, entry.get("timestamp"), text)
+            elif segments[-1]["label"] == OTHER_LABEL and not segments[-1]["prompt"]:
+                segments[-1]["prompt"] = text.strip()[:120]
             continue
         if entry.get("type") != "assistant":
             continue
@@ -293,8 +296,23 @@ def parse_session(transcript_path):
                 "type": meta.get("agentType", "agent"),
                 "description": meta.get("description", ""),
                 "output_tokens": sum_buckets(a_by_model)["output"],
+                "by_model": a_by_model,
             })
     return segments
+
+
+def agents_by_type(subagents, pricing):
+    """Group subagent entries by agent type with summed usage and cost."""
+    groups = {}
+    for a in subagents:
+        g = groups.setdefault(a["type"], {"count": 0, "by_model": {}})
+        g["count"] += 1
+        merge_by_model(g["by_model"], a.get("by_model") or {})
+    out = [{"type": t, "count": g["count"],
+            "usage": sum_buckets(g["by_model"]),
+            "cost_usd": cost_usd(g["by_model"], pricing)}
+           for t, g in groups.items()]
+    return sorted(out, key=lambda g: -(g["cost_usd"] or g["usage"]["output"] / 1e6))
 
 
 def aggregate(segments, pricing):
@@ -307,9 +325,11 @@ def aggregate(segments, pricing):
         agg["subagents"] += len(seg["subagents"])
         merge_by_model(agg["by_model"], seg["by_model"])
         merge_by_model(total_by_model, seg["by_model"])
+        agg.setdefault("_subagents", []).extend(seg["subagents"])
     for agg in by_label.values():
         agg["usage"] = sum_buckets(agg["by_model"])
         agg["cost_usd"] = cost_usd(agg["by_model"], pricing)
+        agg["agents"] = agents_by_type(agg.pop("_subagents", []), pricing)
     return {
         "by_label": by_label,
         "total": {
@@ -319,7 +339,10 @@ def aggregate(segments, pricing):
             "models": sorted(total_by_model),
         },
         "segments": [
-            {**{k: s[k] for k in ("label", "start_ts", "prompt", "subagents")},
+            {**{k: s[k] for k in ("label", "start_ts", "prompt")},
+             "subagents": [{k: v for k, v in a.items() if k != "by_model"}
+                           for a in s["subagents"]],
+             "agents": agents_by_type(s["subagents"], pricing),
              "usage": sum_buckets(s["by_model"]),
              "cost_usd": cost_usd(s["by_model"], pricing)}
             for s in segments
@@ -339,7 +362,7 @@ def fmt_cost(c):
     return f"${c:.2f}" if c is not None else "—"
 
 
-def render_report(data):
+def render_report(data, show_agents=False):
     lines = [
         "| Activity | Calls | Output | Input | Cache read | Cache write | Est. cost |",
         "|---|---:|---:|---:|---:|---:|---:|",
@@ -358,6 +381,14 @@ def render_report(data):
             f"| {fmt_tokens(u['cache_read'])} | {fmt_tokens(u['cache_5m'] + u['cache_1h'])} "
             f"| {fmt_cost(agg['cost_usd'])} |"
         )
+        if show_agents and agg.get("agents"):
+            for g in agg["agents"]:
+                gu = g["usage"]
+                lines.append(
+                    f"| ↳ {g['type']} ×{g['count']} | | {fmt_tokens(gu['output'])} | {fmt_tokens(gu['input'])} "
+                    f"| {fmt_tokens(gu['cache_read'])} | {fmt_tokens(gu['cache_5m'] + gu['cache_1h'])} "
+                    f"| {fmt_cost(g['cost_usd'])} |"
+                )
     t = data["total"]
     u = t["usage"]
     lines.append(
@@ -431,6 +462,8 @@ def main():
     for name in ("report", "json"):
         p = sub.add_parser(name)
         p.add_argument("transcript", nargs="?", default=None)
+        if name == "report":
+            p.add_argument("--agents", action="store_true")
     sub.add_parser("hook")
     args = ap.parse_args()
 
@@ -442,7 +475,7 @@ def main():
     if args.cmd == "json":
         print(json.dumps(data, indent=1))
     else:
-        print(render_report(data))
+        print(render_report(data, show_agents=getattr(args, "agents", False)))
 
 
 if __name__ == "__main__":
