@@ -16,7 +16,7 @@ via the plugin directory submission form: https://clau.de/plugin-directory-submi
   "source": {
     "source": "url",
     "url": "https://github.com/WizzoUK2/token-usage.git",
-    "sha": "d5eb6b0e12949fe58ad5ddb566cd1c9680820881"
+    "sha": "e6a5ed7c9d67a3ded328eb3bc31e87360a2c0681"
   },
   "homepage": "https://github.com/WizzoUK2/token-usage"
 }
