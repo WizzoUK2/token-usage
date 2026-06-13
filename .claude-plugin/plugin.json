@@ -1,12 +1,12 @@
 {
   "name": "token-usage",
-  "version": "0.2.0",
-  "description": "Attribute Claude Code token usage to the work that consumed it — per-slash-command breakdowns, live session ledger, and cost estimates",
+  "version": "0.3.0",
+  "description": "Attribute Claude Code and Cowork token usage to the work that consumed it — per-command and per-skill breakdowns, live session ledger, and cost estimates",
   "author": {
     "name": "Craig Fletcher",
     "email": "craigfletcheruk@gmail.com"
   },
   "repository": "https://github.com/WizzoUK2/token-usage",
   "license": "MIT",
-  "keywords": ["tokens", "usage", "cost", "observability", "analytics"]
+  "keywords": ["tokens", "usage", "cost", "observability", "analytics", "cowork"]
 }

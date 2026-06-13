@@ -6,6 +6,19 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-06-13
+
+### Added
+
+- **Cowork support (Claude desktop app).** Transcript discovery now falls back
+  to the Cowork sandbox mount (`<mount>/.claude/projects/…` and
+  `/sessions/*/mnt/.claude/projects/…`) when no Claude Code project directory
+  matches the cwd; Claude Code keeps priority when both are present.
+- **Per-skill attribution.** Skills invoked mid-turn via the Skill tool (how
+  Cowork runs them, rather than a `<command-name>` prompt) each get their own
+  sticky segment, deduped by tool-use id so streamed duplicates don't reopen or
+  double-count them.
+
 ## [0.2.0] — 2026-06-12
 
 ### Changed

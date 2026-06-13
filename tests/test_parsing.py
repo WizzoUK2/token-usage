@@ -3,6 +3,20 @@ import json
 from conftest import assistant, usage, user, write_jsonl
 
 
+def skill_use(ts, skill, u, request_id=None, use_id=None):
+    """Assistant turn that invokes a Cowork Skill via a tool_use block."""
+    return {
+        "type": "assistant", "timestamp": ts, "requestId": request_id,
+        "message": {
+            "role": "assistant", "model": "claude-fable-5", "usage": u,
+            "content": [{
+                "type": "tool_use", "id": use_id or f"toolu_{skill}",
+                "name": "Skill", "input": {"skill": skill},
+            }],
+        },
+    }
+
+
 def test_dedup_keeps_per_field_maxima(tu, tmp_path):
     # Two streamed snapshots of one request: output grows 10 -> 50.
     t = write_jsonl(tmp_path / "s.jsonl", [
@@ -81,6 +95,34 @@ def test_command_owns_followup_turns(tu, tmp_path):
     assert data["by_label"]["/code-review"]["usage"]["output"] == 150
     assert data["by_label"]["/commit"]["usage"]["output"] == 10
     assert tu.OTHER_LABEL not in data["by_label"]
+
+
+def test_skill_tool_use_starts_sticky_segment(tu, tmp_path):
+    # Cowork: a Skill tool_use opens its own segment that owns the invoking turn
+    # and every follow-up until the next command/skill.
+    t = write_jsonl(tmp_path / "s.jsonl", [
+        user("2026-06-12T10:00:00Z", text="make a report"),
+        assistant("2026-06-12T10:00:01Z", usage(out=10), request_id="r1"),   # pre-skill
+        skill_use("2026-06-12T10:00:02Z", "report", usage(out=40), request_id="r2"),
+        assistant("2026-06-12T10:00:03Z", usage(out=20), request_id="r3"),   # owned by /report
+    ])
+    data = tu.aggregate(tu.parse_session(t), tu.load_pricing())
+    assert data["by_label"]["/report"]["usage"]["output"] == 60  # 40 invoking + 20 follow-up
+    assert data["by_label"]["/report"]["invocations"] == 1
+    assert data["by_label"][tu.OTHER_LABEL]["usage"]["output"] == 10
+
+
+def test_skill_streamed_duplicate_does_not_reopen_segment(tu, tmp_path):
+    # Same tool-use id streamed twice (one requestId): one segment, maxima usage.
+    t = write_jsonl(tmp_path / "s.jsonl", [
+        skill_use("2026-06-12T10:00:01Z", "report", usage(out=10),
+                  request_id="r1", use_id="toolu_1"),
+        skill_use("2026-06-12T10:00:02Z", "report", usage(out=50),
+                  request_id="r1", use_id="toolu_1"),
+    ])
+    data = tu.aggregate(tu.parse_session(t), tu.load_pricing())
+    assert data["by_label"]["/report"]["usage"]["output"] == 50  # maxima, not 60
+    assert data["by_label"]["/report"]["invocations"] == 1
 
 
 def test_no_command_only_before_first_command(tu, tmp_path):

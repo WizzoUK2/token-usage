@@ -16,6 +16,7 @@ Claude Code tells you session totals (`/cost`, OTel metrics) and tools like ccus
 ## Features
 
 - **Per-command attribution** — a slash command owns every turn until the next command, so multi-turn exchanges stay attributed to the command that triggered them. `(no command)` covers only turns that occurred before the first command in the session.
+- **Works in Cowork too** — in the Claude desktop app (Cowork), skills run mid-turn via the Skill tool rather than a `<command-name>` prompt; each gets its own sticky segment (e.g. `/pptx`, `/report`). Transcript discovery falls back to the Cowork sandbox mount when there's no Claude Code project directory for the cwd, so `report` just works in both.
 - **Subagent rollup** — agents spawned during a command (sidechains under `<session>/subagents/`) count toward the command that spawned them, labelled `(+N agents)`.
 - **Per-agent-type breakdown** — `report --agents` adds ↳ indented rows showing token usage by agent type (e.g. `↳ claude-code-guide`, `↳ general-purpose`). These rows are **subsets** of their parent row's totals, not additive — the parent already includes them all.
 - **Cross-session history** — `history` rolls up token usage across all sessions, filterable by project, day (local time), or command. An incremental per-transcript cache (`~/.cache/token-usage/index/`) means transcripts re-parse only when they change; warm scans are near-instant.
@@ -111,6 +112,8 @@ Claude Code writes every session to `~/.claude/projects/<project-slug>/<session-
 2. Starts a new segment at each real user prompt; prompts carrying a `<command-name>` marker label the segment with that command. A command's label is sticky — it covers every subsequent turn until the next command.
 3. Sums each subagent transcript (`<session-id>/subagents/agent-*.jsonl`) and attributes it to the segment active at the agent's start time.
 4. Prices each model's usage against `data/pricing.json`.
+
+In **Cowork** (the Claude desktop app) the same transcript format is mounted read-only inside the session sandbox under `<mount>/.claude/projects/…` (and `/sessions/*/mnt/.claude/projects/…`); discovery uses these when no Claude Code project matches the cwd. Skills there are invoked via a `Skill` tool_use block instead of a `<command-name>` prompt, so each such block opens its own sticky segment (deduped by tool-use id). The Stop hook is Claude-Code-only, so in Cowork run `report` on demand rather than relying on the live ledger.
 
 The Stop hook (`hooks/hooks.json`) re-runs this after every turn and writes the result to `~/.cache/token-usage/<session-id>.json` (override the directory with `TOKEN_USAGE_LEDGER_DIR`). Hook failures never block the session.
 
