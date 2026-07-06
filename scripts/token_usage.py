@@ -31,6 +31,8 @@ LEDGER_DIR = Path(os.environ.get("TOKEN_USAGE_LEDGER_DIR", Path.home() / ".cache
 # Keys are matched by longest prefix against the model ID, so dated IDs resolve too.
 DEFAULT_PRICING = {
     "claude-fable-5": {"input": 10.0, "output": 50.0},
+    "claude-mythos-5": {"input": 10.0, "output": 50.0},
+    "claude-sonnet-5": {"input": 3.0, "output": 15.0},
     "claude-opus-4-8": {"input": 5.0, "output": 25.0},
     "claude-opus-4-7": {"input": 5.0, "output": 25.0},
     "claude-opus-4-6": {"input": 5.0, "output": 25.0},
@@ -72,7 +74,13 @@ def rates_for(model, pricing):
     best = None
     for cand in candidates:
         for key in pricing:
-            if cand.startswith(key) and (best is None or len(key) > len(best)):
+            # A key only matches at a segment boundary, so "claude-opus-4-10"
+            # falls through to "claude-opus-4" instead of hitting "claude-opus-4-1".
+            if not cand.startswith(key):
+                continue
+            if len(cand) > len(key) and cand[len(key)].isalnum():
+                continue
+            if best is None or len(key) > len(best):
                 best = key
     return pricing.get(best) if best else None
 

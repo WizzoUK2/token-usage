@@ -45,6 +45,23 @@ def test_rates_for_provider_prefixed_ids(tu):
     assert tu.rates_for("gpt-4o", pricing) is None
 
 
+def test_bundled_pricing_covers_current_models(tu):
+    pricing = tu.load_pricing()
+    assert tu.rates_for("claude-sonnet-5", pricing) == {"input": 3.0, "output": 15.0}
+    assert tu.rates_for("claude-sonnet-5-20260601", pricing) == {"input": 3.0, "output": 15.0}
+    assert tu.rates_for("claude-mythos-5", pricing) == {"input": 10.0, "output": 50.0}
+
+
+def test_rates_for_prefix_stops_at_segment_boundary(tu):
+    # "claude-opus-4-10" must not match the "claude-opus-4-1" key — it should
+    # fall through to the family base key "claude-opus-4".
+    pricing = {"claude-opus-4": {"input": 1.0, "output": 2.0},
+               "claude-opus-4-1": {"input": 15.0, "output": 75.0}}
+    assert tu.rates_for("claude-opus-4-10", pricing) == pricing["claude-opus-4"]
+    assert tu.rates_for("claude-opus-4-1-20250805", pricing) == pricing["claude-opus-4-1"]
+    assert tu.rates_for("claude-opus-4", pricing) == pricing["claude-opus-4"]
+
+
 def test_cost_and_cache_savings_math(tu):
     pricing = {"m": {"input": 10.0, "output": 50.0}}
     by_model = {"m": {"input": 1_000_000, "output": 1_000_000,
