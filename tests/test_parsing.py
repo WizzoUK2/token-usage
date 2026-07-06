@@ -3,6 +3,20 @@ import json
 from conftest import assistant, usage, user, write_jsonl
 
 
+def skill_use(ts, skill, u, request_id=None, use_id=None):
+    """Assistant turn that invokes a Cowork Skill via a tool_use block."""
+    return {
+        "type": "assistant", "timestamp": ts, "requestId": request_id,
+        "message": {
+            "role": "assistant", "model": "claude-fable-5", "usage": u,
+            "content": [{
+                "type": "tool_use", "id": use_id or f"toolu_{skill}",
+                "name": "Skill", "input": {"skill": skill},
+            }],
+        },
+    }
+
+
 def test_dedup_keeps_per_field_maxima(tu, tmp_path):
     # Two streamed snapshots of one request: output grows 10 -> 50.
     t = write_jsonl(tmp_path / "s.jsonl", [
@@ -45,6 +59,23 @@ def test_rates_for_provider_prefixed_ids(tu):
     assert tu.rates_for("gpt-4o", pricing) is None
 
 
+def test_bundled_pricing_covers_current_models(tu):
+    pricing = tu.load_pricing()
+    assert tu.rates_for("claude-sonnet-5", pricing) == {"input": 3.0, "output": 15.0}
+    assert tu.rates_for("claude-sonnet-5-20260601", pricing) == {"input": 3.0, "output": 15.0}
+    assert tu.rates_for("claude-mythos-5", pricing) == {"input": 10.0, "output": 50.0}
+
+
+def test_rates_for_prefix_stops_at_segment_boundary(tu):
+    # "claude-opus-4-10" must not match the "claude-opus-4-1" key — it should
+    # fall through to the family base key "claude-opus-4".
+    pricing = {"claude-opus-4": {"input": 1.0, "output": 2.0},
+               "claude-opus-4-1": {"input": 15.0, "output": 75.0}}
+    assert tu.rates_for("claude-opus-4-10", pricing) == pricing["claude-opus-4"]
+    assert tu.rates_for("claude-opus-4-1-20250805", pricing) == pricing["claude-opus-4-1"]
+    assert tu.rates_for("claude-opus-4", pricing) == pricing["claude-opus-4"]
+
+
 def test_cost_and_cache_savings_math(tu):
     pricing = {"m": {"input": 10.0, "output": 50.0}}
     by_model = {"m": {"input": 1_000_000, "output": 1_000_000,
@@ -54,6 +85,13 @@ def test_cost_and_cache_savings_math(tu):
     assert tu.cost_usd(by_model, pricing) == 93.5
     # savings: 1MTok read at 0.9 * input rate = 9.0
     assert tu.cache_savings_usd(by_model, pricing) == 9.0
+
+
+def test_project_slug_replaces_all_non_alphanumerics(tu):
+    # Claude Code slugs a project path by replacing every non-alphanumeric
+    # character with a dash — including spaces, not just / . _
+    assert tu.project_slug("/Users/c/My Projects/app_v2.0") == "-Users-c-My-Projects-app-v2-0"
+    assert tu.project_slug("/a/b-c") == "-a-b-c"
 
 
 def test_totals_reconcile_with_segments(tu, tmp_path):
@@ -81,6 +119,34 @@ def test_command_owns_followup_turns(tu, tmp_path):
     assert data["by_label"]["/code-review"]["usage"]["output"] == 150
     assert data["by_label"]["/commit"]["usage"]["output"] == 10
     assert tu.OTHER_LABEL not in data["by_label"]
+
+
+def test_skill_tool_use_starts_sticky_segment(tu, tmp_path):
+    # Cowork: a Skill tool_use opens its own segment that owns the invoking turn
+    # and every follow-up until the next command/skill.
+    t = write_jsonl(tmp_path / "s.jsonl", [
+        user("2026-06-12T10:00:00Z", text="make a report"),
+        assistant("2026-06-12T10:00:01Z", usage(out=10), request_id="r1"),   # pre-skill
+        skill_use("2026-06-12T10:00:02Z", "report", usage(out=40), request_id="r2"),
+        assistant("2026-06-12T10:00:03Z", usage(out=20), request_id="r3"),   # owned by /report
+    ])
+    data = tu.aggregate(tu.parse_session(t), tu.load_pricing())
+    assert data["by_label"]["/report"]["usage"]["output"] == 60  # 40 invoking + 20 follow-up
+    assert data["by_label"]["/report"]["invocations"] == 1
+    assert data["by_label"][tu.OTHER_LABEL]["usage"]["output"] == 10
+
+
+def test_skill_streamed_duplicate_does_not_reopen_segment(tu, tmp_path):
+    # Same tool-use id streamed twice (one requestId): one segment, maxima usage.
+    t = write_jsonl(tmp_path / "s.jsonl", [
+        skill_use("2026-06-12T10:00:01Z", "report", usage(out=10),
+                  request_id="r1", use_id="toolu_1"),
+        skill_use("2026-06-12T10:00:02Z", "report", usage(out=50),
+                  request_id="r1", use_id="toolu_1"),
+    ])
+    data = tu.aggregate(tu.parse_session(t), tu.load_pricing())
+    assert data["by_label"]["/report"]["usage"]["output"] == 50  # maxima, not 60
+    assert data["by_label"]["/report"]["invocations"] == 1
 
 
 def test_no_command_only_before_first_command(tu, tmp_path):

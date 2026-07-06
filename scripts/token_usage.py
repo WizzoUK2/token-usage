@@ -4,9 +4,11 @@
 Parses Claude Code session transcripts (~/.claude/projects/<project>/<session>.jsonl),
 deduplicates streamed usage entries by requestId (taking per-field maxima, since
 streamed duplicates may carry partial usage snapshots), segments the session at
-slash-command invocations (a command owns all turns until the next command),
-rolls subagent transcripts up into the segment that spawned them, and prices
-the result against a bundled pricing table.
+slash-command invocations — or Skill tool_use blocks in Cowork (the Claude
+desktop app) — where each owns all turns until the next, rolls subagent
+transcripts up into the segment that spawned them, and prices the result against
+a bundled pricing table. Transcript discovery falls back to the Cowork sandbox
+mount when no Claude Code project directory matches the cwd.
 
 Subcommands:
     report [TRANSCRIPT]   Markdown breakdown table (default: latest session in cwd project)
@@ -31,6 +33,8 @@ LEDGER_DIR = Path(os.environ.get("TOKEN_USAGE_LEDGER_DIR", Path.home() / ".cache
 # Keys are matched by longest prefix against the model ID, so dated IDs resolve too.
 DEFAULT_PRICING = {
     "claude-fable-5": {"input": 10.0, "output": 50.0},
+    "claude-mythos-5": {"input": 10.0, "output": 50.0},
+    "claude-sonnet-5": {"input": 3.0, "output": 15.0},
     "claude-opus-4-8": {"input": 5.0, "output": 25.0},
     "claude-opus-4-7": {"input": 5.0, "output": 25.0},
     "claude-opus-4-6": {"input": 5.0, "output": 25.0},
@@ -72,7 +76,13 @@ def rates_for(model, pricing):
     best = None
     for cand in candidates:
         for key in pricing:
-            if cand.startswith(key) and (best is None or len(key) > len(best)):
+            # A key only matches at a segment boundary, so "claude-opus-4-10"
+            # falls through to "claude-opus-4" instead of hitting "claude-opus-4-1".
+            if not cand.startswith(key):
+                continue
+            if len(cand) > len(key) and cand[len(key)].isalnum():
+                continue
+            if best is None or len(key) > len(best):
                 best = key
     return pricing.get(best) if best else None
 
@@ -228,6 +238,7 @@ def parse_session(transcript_path):
         })
 
     pending = {}  # requestId -> (segment, model, flat maxima); segment = first occurrence's
+    seen_skill_uses = set()  # Skill tool_use ids already segmented (Cowork)
     for entry in iter_jsonl(transcript_path):
         if is_user_prompt(entry):
             text = text_of((entry.get("message") or {}).get("content"))
@@ -245,6 +256,21 @@ def parse_session(transcript_path):
         if entry.get("type") != "assistant":
             continue
         msg = entry.get("message") or {}
+        # Cowork (Claude desktop app): skills are invoked mid-turn via the Skill
+        # tool rather than a <command-name> user prompt. Give each skill its own
+        # segment (sticky until the next command/skill), deduped by tool-use id
+        # so streamed duplicates don't reopen it. Runs before the requestId dedup
+        # below because a streamed duplicate may carry the same tool_use block.
+        content = msg.get("content")
+        if isinstance(content, list):
+            for block in content:
+                if (isinstance(block, dict) and block.get("type") == "tool_use"
+                        and block.get("name") == "Skill"):
+                    skill = (block.get("input") or {}).get("skill")
+                    use_id = block.get("id") or f"{entry.get('requestId')}:{skill}"
+                    if skill and use_id not in seen_skill_uses:
+                        seen_skill_uses.add(use_id)
+                        new_segment("/" + str(skill), entry.get("timestamp"))
         usage = msg.get("usage")
         if not usage:
             continue
@@ -315,6 +341,14 @@ def agents_by_type(subagents, pricing):
     return sorted(out, key=lambda g: -(g["cost_usd"] or g["usage"]["output"] / 1e6))
 
 
+def models_breakdown(by_model, pricing):
+    """Per-model rows (subsets of the containing total) with summed usage and cost."""
+    out = [{"model": m, "usage": dict(bucket),
+            "cost_usd": cost_usd({m: bucket}, pricing)}
+           for m, bucket in by_model.items()]
+    return sorted(out, key=lambda r: -(r["cost_usd"] or r["usage"]["output"] / 1e6))
+
+
 def aggregate(segments, pricing):
     by_label, total_by_model = {}, {}
     for seg in segments:
@@ -330,6 +364,7 @@ def aggregate(segments, pricing):
         agg["usage"] = sum_buckets(agg["by_model"])
         agg["cost_usd"] = cost_usd(agg["by_model"], pricing)
         agg["agents"] = agents_by_type(agg.pop("_subagents", []), pricing)
+        agg["models"] = models_breakdown(agg["by_model"], pricing)
     return {
         "by_label": by_label,
         "total": {
@@ -337,6 +372,7 @@ def aggregate(segments, pricing):
             "cost_usd": cost_usd(total_by_model, pricing),
             "cache_savings_usd": cache_savings_usd(total_by_model, pricing),
             "models": sorted(total_by_model),
+            "by_model": total_by_model,
         },
         "segments": [
             {**{k: s[k] for k in ("label", "start_ts", "prompt")},
@@ -368,7 +404,14 @@ def fmt_cost_delta(c):
     return f"{'-' if c < 0 else '+'}${abs(c):.2f}"
 
 
-def render_report(data, show_agents=False):
+def sub_row(label, u, cost):
+    """One ↳ breakdown row (a subset of its parent row) for the report table."""
+    return (f"| ↳ {label} | | {fmt_tokens(u['output'])} | {fmt_tokens(u['input'])} "
+            f"| {fmt_tokens(u['cache_read'])} | {fmt_tokens(u['cache_5m'] + u['cache_1h'])} "
+            f"| {fmt_cost(cost)} |")
+
+
+def render_report(data, show_agents=False, show_models=False):
     lines = [
         "| Activity | Calls | Output | Input | Cache read | Cache write | Est. cost |",
         "|---|---:|---:|---:|---:|---:|---:|",
@@ -387,14 +430,12 @@ def render_report(data, show_agents=False):
             f"| {fmt_tokens(u['cache_read'])} | {fmt_tokens(u['cache_5m'] + u['cache_1h'])} "
             f"| {fmt_cost(agg['cost_usd'])} |"
         )
+        if show_models and agg.get("models"):
+            lines += [sub_row(m["model"], m["usage"], m["cost_usd"])
+                      for m in agg["models"]]
         if show_agents and agg.get("agents"):
-            for g in agg["agents"]:
-                gu = g["usage"]
-                lines.append(
-                    f"| ↳ {g['type']} ×{g['count']} | | {fmt_tokens(gu['output'])} | {fmt_tokens(gu['input'])} "
-                    f"| {fmt_tokens(gu['cache_read'])} | {fmt_tokens(gu['cache_5m'] + gu['cache_1h'])} "
-                    f"| {fmt_cost(g['cost_usd'])} |"
-                )
+            lines += [sub_row(f"{g['type']} ×{g['count']}", g["usage"], g["cost_usd"])
+                      for g in agg["agents"]]
     t = data["total"]
     u = t["usage"]
     lines.append(
@@ -454,7 +495,7 @@ def render_diff(d):
     return "\n".join(lines)
 
 
-INDEX_VERSION = 1
+INDEX_VERSION = 2
 
 
 def projects_dir():
@@ -481,6 +522,7 @@ def summarize_transcript(path, pricing, st=None):
         "by_label": {label: {"usage": agg["usage"], "cost_usd": agg["cost_usd"],
                              "invocations": agg["invocations"]}
                      for label, agg in data["by_label"].items()},
+        "by_model": data["total"]["by_model"],
         "total": {"usage": data["total"]["usage"],
                   "cost_usd": data["total"]["cost_usd"]},
     }
@@ -506,16 +548,26 @@ def cached_summary(path, pricing):
     return s, False
 
 
+def _since_days(arg):
+    """Day count of a relative 'Nd' --since value, or None if not that form."""
+    m = re.fullmatch(r"(\d+)d", arg or "")
+    return int(m.group(1)) if m else None
+
+
 def since_cutoff(arg):
-    """'7d' -> ISO instant 7 days ago; ISO strings pass through. None -> None."""
+    """'7d' -> ISO instant 7 days ago; ISO dates pass through; junk errors out."""
     if not arg:
         return None
-    m = re.fullmatch(r"(\d+)d", arg)
-    if m:
+    days = _since_days(arg)
+    if days is not None:
         from datetime import datetime, timedelta, timezone
         return (datetime.now(timezone.utc)
-                - timedelta(days=int(m.group(1)))).strftime("%Y-%m-%dT%H:%M:%SZ")
-    return arg
+                - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}([T ].*)?", arg):
+        return arg
+    # Anything else would string-compare against ISO timestamps and silently
+    # filter out every session — reject loudly instead.
+    sys.exit(f"token-usage: invalid --since value {arg!r} — use Nd (e.g. 7d) or YYYY-MM-DD")
 
 
 def _local_day(ts):
@@ -529,7 +581,7 @@ def _local_day(ts):
         return ts[:10]
 
 
-def run_history(by="project", since=None):
+def run_history(by="project", since=None, project=None):
     pricing = load_pricing()
     cutoff = since_cutoff(since)
     rows = {}
@@ -556,21 +608,58 @@ def run_history(by="project", since=None):
                 print(f"token-usage: parsed {parsed} transcripts…", file=sys.stderr)
         if cutoff and (s["first_ts"] or "") < cutoff:
             continue
+        if project and project not in s["project"]:
+            continue
         if by == "project":
             add_row(s["project"], s["total"]["usage"], s["total"]["cost_usd"], 1)
         elif by == "day":
             add_row(_local_day(s["first_ts"]), s["total"]["usage"], s["total"]["cost_usd"], 1)
+        elif by == "model":
+            for model, bucket in s.get("by_model", {}).items():
+                add_row(model, bucket, cost_usd({model: bucket}, pricing),
+                        bucket.get("requests", 0))
         else:  # command
             for label, agg in s["by_label"].items():
                 add_row(label, agg["usage"], agg["cost_usd"], agg["invocations"])
 
     ordered = sorted(rows.values(), key=lambda r: (-(r["cost_usd"] or 0), r["key"]))
-    return {"by": by, "since": since, "rows": ordered}
+    return {"by": by, "since": since, "project": project, "rows": ordered}
+
+
+def burn_rate_line(total_cost, since):
+    """Projection footer for a relative --since window; None when not applicable."""
+    if total_cost is None:
+        return None
+    days = _since_days(since)
+    if not days:
+        return None
+    per_day = total_cost / days
+    return (f"Burn rate: ~${per_day:.2f}/day over the last {days}d "
+            f"(≈ ${per_day * 7:.2f}/week at this pace).")
+
+
+def render_history_csv(data):
+    import csv
+    import io
+    buf = io.StringIO()
+    w = csv.writer(buf, lineterminator="\n")
+    calls_col = "requests" if data["by"] == "model" else "calls"
+    w.writerow([data["by"], calls_col, "output", "input",
+                "cache_read", "cache_5m", "cache_1h", "cost_usd"])
+    for r in data["rows"]:
+        u = r["usage"]
+        w.writerow([r["key"], r["calls"], u["output"], u["input"],
+                    u["cache_read"], u["cache_5m"], u["cache_1h"],
+                    "" if r["cost_usd"] is None else f"{r['cost_usd']:.4f}"])
+    return buf.getvalue()
 
 
 def render_history(data):
-    head = {"project": "Project", "day": "Day", "command": "Command"}[data["by"]]
-    lines = [f"| {head} | Calls | Output | Input | Cache read | Cache write | Est. cost |",
+    head = {"project": "Project", "day": "Day",
+            "command": "Command", "model": "Model"}[data["by"]]
+    # Per-model counts are API requests, not sessions/invocations.
+    calls_head = "Requests" if data["by"] == "model" else "Calls"
+    lines = [f"| {head} | {calls_head} | Output | Input | Cache read | Cache write | Est. cost |",
              "|---|---:|---:|---:|---:|---:|---:|"]
     total = empty_usage()
     total_cost, calls = None, 0
@@ -587,17 +676,39 @@ def render_history(data):
     lines.append(f"| **Total** | **{calls}** | **{fmt_tokens(total['output'])}** | **{fmt_tokens(total['input'])}** "
                  f"| **{fmt_tokens(total['cache_read'])}** | **{fmt_tokens(total['cache_5m'] + total['cache_1h'])}** "
                  f"| **{fmt_cost(total_cost)}** |")
+    burn = burn_rate_line(total_cost, data.get("since"))
+    if burn:
+        lines += ["", burn]
     return "\n".join(lines)
 
 
+def project_slug(path_str):
+    # Claude Code slugs project paths by replacing every non-alphanumeric
+    # character with a dash (not just / . _).
+    return re.sub(r"[^A-Za-z0-9]", "-", path_str)
+
+
 def find_latest_transcript():
-    # Claude Code slugs project paths by replacing /, ., and _ with dashes.
-    slug = re.sub(r"[/._]", "-", str(Path.cwd()))
-    project_dir = Path.home() / ".claude" / "projects" / slug
-    if not project_dir.is_dir():
-        return None
-    files = sorted(project_dir.glob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
-    return files[0] if files else None
+    # 1) Claude Code: ~/.claude/projects/<cwd-slug>/*.jsonl
+    project_dir = Path.home() / ".claude" / "projects" / project_slug(str(Path.cwd()))
+    if project_dir.is_dir():
+        files = sorted(project_dir.glob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
+        if files:
+            return files[0]
+    # 2) Cowork (Claude desktop app): the sandbox mounts the live session's
+    #    transcript read-only under <mount>/.claude/projects/<slug>/<session>.jsonl.
+    #    Only the current session's project is present, so take the newest .jsonl.
+    cowork_roots = [Path.home() / "mnt" / ".claude" / "projects"]
+    sessions = Path("/sessions")
+    if sessions.is_dir():
+        cowork_roots.extend(sorted(sessions.glob("*/mnt/.claude/projects")))
+    for root in cowork_roots:
+        if not root.is_dir():
+            continue
+        files = sorted(root.glob("*/*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
+        if files:
+            return files[0]
+    return None
 
 
 def resolve_transcript(arg):
@@ -621,6 +732,16 @@ def run_hook():
     session_id = re.sub(r"[^A-Za-z0-9_-]", "", str(payload.get("session_id", "unknown"))) or "unknown"
     if not transcript or not Path(transcript).exists():
         return 0
+    transcript = Path(transcript)
+    if transcript.parent.name == "subagents":
+        # SubagentStop delivers the subagent's own sidechain transcript; find
+        # the owning session transcript and re-aggregate the whole session.
+        main = next((p / f"{session_id}.jsonl" for p in transcript.parents
+                     if (p / f"{session_id}.jsonl").is_file()), None)
+        if main is None:
+            return 0  # never ledger sidechain-only data under the session id
+        transcript = main
+    is_subagent_stop = payload.get("hook_event_name") == "SubagentStop"
     try:
         data = aggregate(parse_session(transcript), load_pricing())
         data["session_id"] = session_id
@@ -628,11 +749,16 @@ def run_hook():
         LEDGER_DIR.mkdir(parents=True, exist_ok=True)
         ledger = LEDGER_DIR / f"{session_id}.json"
 
-        prior_notified = False
+        prior_multiple = 0
         if ledger.exists():
             try:
                 prior = json.loads(ledger.read_text())
-                prior_notified = isinstance(prior, dict) and bool(prior.get("budget_notified"))
+                if isinstance(prior, dict):
+                    pm = prior.get("budget_notified_multiple")
+                    if isinstance(pm, (int, float)):
+                        prior_multiple = int(pm)
+                    elif prior.get("budget_notified"):  # 0.2.x ledgers: bool only
+                        prior_multiple = 1
             except (json.JSONDecodeError, OSError):
                 pass
         limit = None
@@ -641,26 +767,35 @@ def run_hook():
         except (KeyError, ValueError):
             pass
         cost = data["total"]["cost_usd"]
-        fire = (limit is not None and not prior_notified
-                and cost is not None and cost >= limit)
-        data["budget_notified"] = prior_notified or fire
+        multiple = int(cost // limit) if (limit and limit > 0 and cost is not None) else 0
+        # Parallel SubagentStop hooks race the ledger read-modify-write, so
+        # only the (serial) Stop hook fires nudges and advances the counter.
+        fire = multiple > prior_multiple and not is_subagent_stop
+        notified = multiple if fire else prior_multiple
+        data["budget_notified"] = notified >= 1
+        data["budget_notified_multiple"] = notified
 
-        tmp = ledger.with_suffix(".tmp")
+        # Per-process temp names: concurrent SubagentStop hooks must never
+        # interleave writes into a shared temp file.
+        tmp = ledger.with_suffix(f".{os.getpid()}.tmp")
         tmp.write_text(json.dumps(data, indent=1))
         tmp.replace(ledger)
-        (LEDGER_DIR / "latest.json").unlink(missing_ok=True)
+        link_tmp = LEDGER_DIR / f".latest.{os.getpid()}.tmp"
         try:
-            (LEDGER_DIR / "latest.json").symlink_to(ledger)
+            link_tmp.symlink_to(ledger)
+            link_tmp.replace(LEDGER_DIR / "latest.json")
         except OSError:
-            pass
+            link_tmp.unlink(missing_ok=True)
         if fire:
             top = "—"
             if data["by_label"]:
                 top = max(data["by_label"].items(),
                           key=lambda kv: kv[1]["cost_usd"] or 0)[0]
+            passed = (f"{multiple}× your ${limit:.2f} budget" if multiple >= 2
+                      else f"your ${limit:.2f} budget")
             print(json.dumps({"systemMessage":
-                f"token-usage: session estimate ${cost:.2f} has passed your "
-                f"${limit:.2f} budget — top consumer: {top}"}))
+                f"token-usage: session estimate ${cost:.2f} has passed "
+                f"{passed} — top consumer: {top}"}))
 
     except Exception:
         return 0  # a broken ledger update must never break the session
@@ -675,25 +810,35 @@ def main():
         p.add_argument("transcript", nargs="?", default=None)
         if name == "report":
             p.add_argument("--agents", action="store_true")
+            p.add_argument("--models", action="store_true")
         p.add_argument("--diff", nargs=2, metavar=("OLD", "NEW"), default=None)
     sub.add_parser("hook")
     h = sub.add_parser("history")
-    h.add_argument("--by", choices=("project", "day", "command"), default="project")
+    h.add_argument("--by", choices=("project", "day", "command", "model"), default="project")
     h.add_argument("--since", default=None)
+    h.add_argument("--project", default=None)
     h.add_argument("--json", action="store_true", dest="as_json")
+    h.add_argument("--csv", action="store_true", dest="as_csv")
     args = ap.parse_args()
 
     if args.cmd == "hook":
         sys.exit(run_hook())
     if args.cmd == "history":
-        data = run_history(by=args.by, since=args.since)
-        print(json.dumps(data, indent=1) if args.as_json else render_history(data))
+        if args.as_json and args.as_csv:
+            sys.exit("token-usage: --json and --csv cannot be combined")
+        data = run_history(by=args.by, since=args.since, project=args.project)
+        if args.as_json:
+            print(json.dumps(data, indent=1))
+        elif args.as_csv:
+            print(render_history_csv(data), end="")
+        else:
+            print(render_history(data))
         return
     if getattr(args, "diff", None):
         if getattr(args, "transcript", None):
             sys.exit("token-usage: --diff ignores TRANSCRIPT — pass exactly two paths to --diff")
-        if getattr(args, "agents", False):
-            sys.exit("token-usage: --diff and --agents cannot be combined")
+        if getattr(args, "agents", False) or getattr(args, "models", False):
+            sys.exit("token-usage: --diff cannot be combined with --agents or --models")
         d = diff_data(Path(args.diff[0]), Path(args.diff[1]), load_pricing())
         print(json.dumps(d, indent=1) if args.cmd == "json" else render_diff(d))
         return
@@ -703,7 +848,8 @@ def main():
     if args.cmd == "json":
         print(json.dumps(data, indent=1))
     else:
-        print(render_report(data, show_agents=getattr(args, "agents", False)))
+        print(render_report(data, show_agents=getattr(args, "agents", False),
+                            show_models=getattr(args, "models", False)))
 
 
 if __name__ == "__main__":
