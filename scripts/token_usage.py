@@ -699,11 +699,16 @@ def run_hook():
         LEDGER_DIR.mkdir(parents=True, exist_ok=True)
         ledger = LEDGER_DIR / f"{session_id}.json"
 
-        prior_notified = False
+        prior_multiple = 0
         if ledger.exists():
             try:
                 prior = json.loads(ledger.read_text())
-                prior_notified = isinstance(prior, dict) and bool(prior.get("budget_notified"))
+                if isinstance(prior, dict):
+                    pm = prior.get("budget_notified_multiple")
+                    if isinstance(pm, (int, float)):
+                        prior_multiple = int(pm)
+                    elif prior.get("budget_notified"):  # 0.2.x ledgers: bool only
+                        prior_multiple = 1
             except (json.JSONDecodeError, OSError):
                 pass
         limit = None
@@ -712,9 +717,11 @@ def run_hook():
         except (KeyError, ValueError):
             pass
         cost = data["total"]["cost_usd"]
-        fire = (limit is not None and not prior_notified
-                and cost is not None and cost >= limit)
-        data["budget_notified"] = prior_notified or fire
+        multiple = int(cost // limit) if (limit and limit > 0 and cost is not None) else 0
+        fire = multiple > prior_multiple
+        notified = max(multiple, prior_multiple) if fire else prior_multiple
+        data["budget_notified"] = notified >= 1
+        data["budget_notified_multiple"] = notified
 
         tmp = ledger.with_suffix(".tmp")
         tmp.write_text(json.dumps(data, indent=1))
@@ -729,9 +736,11 @@ def run_hook():
             if data["by_label"]:
                 top = max(data["by_label"].items(),
                           key=lambda kv: kv[1]["cost_usd"] or 0)[0]
+            passed = (f"{multiple}× your ${limit:.2f} budget" if prior_multiple >= 1
+                      else f"your ${limit:.2f} budget")
             print(json.dumps({"systemMessage":
-                f"token-usage: session estimate ${cost:.2f} has passed your "
-                f"${limit:.2f} budget — top consumer: {top}"}))
+                f"token-usage: session estimate ${cost:.2f} has passed "
+                f"{passed} — top consumer: {top}"}))
 
     except Exception:
         return 0  # a broken ledger update must never break the session

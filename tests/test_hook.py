@@ -77,6 +77,38 @@ def test_budget_under_limit_is_silent_and_unarmed(tmp_path):
     assert "passed your $10.00 budget" in json.loads(r2.stdout)["systemMessage"]
 
 
+def test_budget_renudges_at_each_multiple(tmp_path):
+    # $15 on a $10 budget -> first nudge (1x). Growing past $20 -> 2x nudge.
+    t = make_transcript(tmp_path, out_tokens=300_000)      # fable: ≈ $15
+    payload = {"session_id": "bud-5", "transcript_path": str(t)}
+    env = {"TOKEN_USAGE_BUDGET_USD": "10"}
+    r1 = run_hook(payload, tmp_path, env)
+    assert "passed your $10.00 budget" in json.loads(r1.stdout)["systemMessage"]
+    r2 = run_hook(payload, tmp_path, env)                  # unchanged cost: silent
+    assert r2.stdout.strip() == ""
+    make_transcript(tmp_path, out_tokens=500_000)          # grows to ≈ $25
+    r3 = run_hook(payload, tmp_path, env)
+    msg = json.loads(r3.stdout)["systemMessage"]
+    assert "2×" in msg and "$10.00" in msg
+    r4 = run_hook(payload, tmp_path, env)                  # 2x already notified: silent
+    assert r4.stdout.strip() == ""
+    ledger = json.loads((tmp_path / "ledger" / "bud-5.json").read_text())
+    assert ledger["budget_notified_multiple"] == 2
+    assert ledger["budget_notified"] is True               # legacy field still maintained
+
+
+def test_budget_multiple_survives_legacy_bool_ledger(tmp_path):
+    # A 0.2.x ledger has only budget_notified: true — treat as 1x already sent.
+    t = make_transcript(tmp_path, out_tokens=300_000)      # ≈ $15 -> still 1x
+    payload = {"session_id": "bud-6", "transcript_path": str(t)}
+    ledger_dir = tmp_path / "ledger"
+    ledger_dir.mkdir(parents=True)
+    (ledger_dir / "bud-6.json").write_text('{"budget_notified": true}')
+    r = run_hook(payload, tmp_path, {"TOKEN_USAGE_BUDGET_USD": "10"})
+    assert r.returncode == 0
+    assert r.stdout.strip() == ""                          # 1x was already notified
+
+
 def test_hook_recovers_from_non_dict_ledger(tmp_path):
     t = make_transcript(tmp_path)
     payload = {"session_id": "bud-4", "transcript_path": str(t)}
