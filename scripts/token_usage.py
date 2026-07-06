@@ -598,10 +598,14 @@ def render_history(data):
     return "\n".join(lines)
 
 
+def project_slug(path_str):
+    # Claude Code slugs project paths by replacing every non-alphanumeric
+    # character with a dash (not just / . _).
+    return re.sub(r"[^A-Za-z0-9]", "-", path_str)
+
+
 def find_latest_transcript():
-    # Claude Code slugs project paths by replacing /, ., and _ with dashes.
-    slug = re.sub(r"[/._]", "-", str(Path.cwd()))
-    project_dir = Path.home() / ".claude" / "projects" / slug
+    project_dir = Path.home() / ".claude" / "projects" / project_slug(str(Path.cwd()))
     if not project_dir.is_dir():
         return None
     files = sorted(project_dir.glob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)

@@ -73,6 +73,13 @@ def test_cost_and_cache_savings_math(tu):
     assert tu.cache_savings_usd(by_model, pricing) == 9.0
 
 
+def test_project_slug_replaces_all_non_alphanumerics(tu):
+    # Claude Code slugs a project path by replacing every non-alphanumeric
+    # character with a dash — including spaces, not just / . _
+    assert tu.project_slug("/Users/c/My Projects/app_v2.0") == "-Users-c-My-Projects-app-v2-0"
+    assert tu.project_slug("/a/b-c") == "-a-b-c"
+
+
 def test_totals_reconcile_with_segments(tu, tmp_path):
     t = write_jsonl(tmp_path / "s.jsonl", [
         user("2026-06-12T10:00:00Z", command="/commit"),
