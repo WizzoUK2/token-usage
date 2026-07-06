@@ -603,6 +603,19 @@ def run_history(by="project", since=None, project=None):
     return {"by": by, "since": since, "project": project, "rows": ordered}
 
 
+def burn_rate_line(total_cost, since):
+    """Projection footer for a relative --since window; None when not applicable."""
+    if total_cost is None or not since:
+        return None
+    m = re.fullmatch(r"(\d+)d", since)
+    if not m or int(m.group(1)) == 0:
+        return None
+    days = int(m.group(1))
+    per_day = total_cost / days
+    return (f"Burn rate: ~${per_day:.2f}/day over the last {days}d "
+            f"(≈ ${per_day * 7:.2f}/week at this pace).")
+
+
 def render_history_csv(data):
     import csv
     import io
@@ -638,6 +651,9 @@ def render_history(data):
     lines.append(f"| **Total** | **{calls}** | **{fmt_tokens(total['output'])}** | **{fmt_tokens(total['input'])}** "
                  f"| **{fmt_tokens(total['cache_read'])}** | **{fmt_tokens(total['cache_5m'] + total['cache_1h'])}** "
                  f"| **{fmt_cost(total_cost)}** |")
+    burn = burn_rate_line(total_cost, data.get("since"))
+    if burn:
+        lines += ["", burn]
     return "\n".join(lines)
 
 

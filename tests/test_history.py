@@ -126,6 +126,26 @@ def test_history_csv_output(tu, tmp_path, monkeypatch):
     assert float(one["cost_usd"]) > 0
 
 
+def test_history_burn_rate_footer_for_relative_since(tu, tmp_path, monkeypatch):
+    seed_projects(tmp_path, monkeypatch)
+    # Relative window -> footer with per-day average and weekly projection.
+    out = tu.render_history(tu.run_history(by="project", since="36500d"))
+    assert "Burn rate" in out and "/day" in out and "/week" in out
+    # No window (or absolute date) -> no projection; a partial window would lie.
+    assert "Burn rate" not in tu.render_history(tu.run_history(by="project"))
+    assert "Burn rate" not in tu.render_history(
+        tu.run_history(by="project", since="2026-01-01"))
+
+
+def test_history_burn_rate_math(tu):
+    # 7-day window, $14 total -> $2.00/day, $14.00/week.
+    line = tu.burn_rate_line(14.0, "7d")
+    assert "$2.00/day" in line and "$14.00/week" in line
+    assert tu.burn_rate_line(14.0, "2026-01-01") is None
+    assert tu.burn_rate_line(None, "7d") is None
+    assert tu.burn_rate_line(14.0, "0d") is None
+
+
 def test_history_recovers_from_corrupt_cache_entry(tu, tmp_path, monkeypatch):
     seed_projects(tmp_path, monkeypatch)
     tu.run_history(by="project")
