@@ -479,7 +479,7 @@ def render_diff(d):
     return "\n".join(lines)
 
 
-INDEX_VERSION = 1
+INDEX_VERSION = 2
 
 
 def projects_dir():
@@ -498,6 +498,9 @@ def summarize_transcript(path, pricing, st=None):
     st = st or path.stat()
     segs = parse_session(path)
     data = aggregate(segs, pricing)
+    total_by_model = {}
+    for seg in segs:
+        merge_by_model(total_by_model, seg["by_model"])
     return {
         "version": INDEX_VERSION, "path": str(path),
         "mtime_ns": st.st_mtime_ns, "size": st.st_size,
@@ -506,6 +509,7 @@ def summarize_transcript(path, pricing, st=None):
         "by_label": {label: {"usage": agg["usage"], "cost_usd": agg["cost_usd"],
                              "invocations": agg["invocations"]}
                      for label, agg in data["by_label"].items()},
+        "by_model": total_by_model,
         "total": {"usage": data["total"]["usage"],
                   "cost_usd": data["total"]["cost_usd"]},
     }
@@ -554,7 +558,7 @@ def _local_day(ts):
         return ts[:10]
 
 
-def run_history(by="project", since=None):
+def run_history(by="project", since=None, project=None):
     pricing = load_pricing()
     cutoff = since_cutoff(since)
     rows = {}
@@ -581,20 +585,42 @@ def run_history(by="project", since=None):
                 print(f"token-usage: parsed {parsed} transcripts…", file=sys.stderr)
         if cutoff and (s["first_ts"] or "") < cutoff:
             continue
+        if project and project not in s["project"]:
+            continue
         if by == "project":
             add_row(s["project"], s["total"]["usage"], s["total"]["cost_usd"], 1)
         elif by == "day":
             add_row(_local_day(s["first_ts"]), s["total"]["usage"], s["total"]["cost_usd"], 1)
+        elif by == "model":
+            for model, bucket in s.get("by_model", {}).items():
+                add_row(model, bucket, cost_usd({model: bucket}, pricing),
+                        bucket.get("requests", 0))
         else:  # command
             for label, agg in s["by_label"].items():
                 add_row(label, agg["usage"], agg["cost_usd"], agg["invocations"])
 
     ordered = sorted(rows.values(), key=lambda r: (-(r["cost_usd"] or 0), r["key"]))
-    return {"by": by, "since": since, "rows": ordered}
+    return {"by": by, "since": since, "project": project, "rows": ordered}
+
+
+def render_history_csv(data):
+    import csv
+    import io
+    buf = io.StringIO()
+    w = csv.writer(buf, lineterminator="\n")
+    w.writerow([data["by"], "calls", "output", "input",
+                "cache_read", "cache_5m", "cache_1h", "cost_usd"])
+    for r in data["rows"]:
+        u = r["usage"]
+        w.writerow([r["key"], r["calls"], u["output"], u["input"],
+                    u["cache_read"], u["cache_5m"], u["cache_1h"],
+                    "" if r["cost_usd"] is None else f"{r['cost_usd']:.4f}"])
+    return buf.getvalue()
 
 
 def render_history(data):
-    head = {"project": "Project", "day": "Day", "command": "Command"}[data["by"]]
+    head = {"project": "Project", "day": "Day",
+            "command": "Command", "model": "Model"}[data["by"]]
     lines = [f"| {head} | Calls | Output | Input | Cache read | Cache write | Est. cost |",
              "|---|---:|---:|---:|---:|---:|---:|"]
     total = empty_usage()
@@ -708,16 +734,25 @@ def main():
         p.add_argument("--diff", nargs=2, metavar=("OLD", "NEW"), default=None)
     sub.add_parser("hook")
     h = sub.add_parser("history")
-    h.add_argument("--by", choices=("project", "day", "command"), default="project")
+    h.add_argument("--by", choices=("project", "day", "command", "model"), default="project")
     h.add_argument("--since", default=None)
+    h.add_argument("--project", default=None)
     h.add_argument("--json", action="store_true", dest="as_json")
+    h.add_argument("--csv", action="store_true", dest="as_csv")
     args = ap.parse_args()
 
     if args.cmd == "hook":
         sys.exit(run_hook())
     if args.cmd == "history":
-        data = run_history(by=args.by, since=args.since)
-        print(json.dumps(data, indent=1) if args.as_json else render_history(data))
+        if args.as_json and args.as_csv:
+            sys.exit("token-usage: --json and --csv cannot be combined")
+        data = run_history(by=args.by, since=args.since, project=args.project)
+        if args.as_json:
+            print(json.dumps(data, indent=1))
+        elif args.as_csv:
+            print(render_history_csv(data), end="")
+        else:
+            print(render_history(data))
         return
     if getattr(args, "diff", None):
         if getattr(args, "transcript", None):
