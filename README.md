@@ -2,6 +2,8 @@
 
 **Where did my tokens go?** A Claude Code plugin that attributes token usage to the work that consumed it — per-slash-command breakdowns, subagent rollups, a live per-session ledger, cross-session history, and cache-aware cost estimates.
 
+📖 **Documentation:** [discovery.wickedsick.com/token-usage-claude-code-plugin-documentation](https://discovery.wickedsick.com/token-usage-claude-code-plugin-documentation) — overview, use cases, and how it works, kept in step with each release.
+
 Claude Code tells you session totals (`/cost`, OTel metrics) and tools like ccusage aggregate by day/model — but nothing answers *"the PR review cost 120k tokens, the refactor cost 800k"*. token-usage fills that gap.
 
 ```
