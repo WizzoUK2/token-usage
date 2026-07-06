@@ -3,7 +3,7 @@ name: report
 description: Generate a per-activity breakdown of Claude Code or Cowork token usage and estimated API cost for the current or a past session, attributing usage to slash commands (Claude Code) or skills (Cowork), including subagent rollups, per-agent-type and per-model breakdowns, cross-session history with burn rate, compare mode, and budget nudge status. This skill should be used when the user asks "where did my tokens go", "token usage report", "how many tokens did that command or skill use", "what did this session cost", "which command/skill/subagent/model used the most tokens", "show me token history", "what did I spend this week", "what's my burn rate", "token history by day/project/command/model", or "compare token usage between two sessions".
 argument-hint: "[transcript-path]"
 allowed-tools: Bash, Read
-version: 0.3.0
+version: 0.4.0
 ---
 
 # token-usage report

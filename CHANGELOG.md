@@ -6,7 +6,7 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-## [0.3.0] — 2026-07-06
+## [0.4.0] — 2026-07-06
 
 ### Fixed
 
@@ -21,14 +21,6 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
-- **Cowork support (Claude desktop app).** Transcript discovery now falls back
-  to the Cowork sandbox mount (`<mount>/.claude/projects/…` and
-  `/sessions/*/mnt/.claude/projects/…`) when no Claude Code project directory
-  matches the cwd; Claude Code keeps priority when both are present.
-- **Per-skill attribution.** Skills invoked mid-turn via the Skill tool (how
-  Cowork runs them, rather than a `<command-name>` prompt) each get their own
-  sticky segment, deduped by tool-use id so streamed duplicates don't reopen or
-  double-count them.
 - `report --models` — per-model ↳ breakdown rows (subsets of the parent
   row); `json` output gains `models` arrays per label unconditionally.
 - `history --by model` — cross-session rollup by model (calls = API
@@ -62,6 +54,19 @@ adheres to [Semantic Versioning](https://semver.org/).
   an error instead of silently filtering out every session.
 - `history --by model` labels its count column **Requests** (API
   requests), since the other groupings count sessions/invocations.
+
+## [0.3.0] — 2026-06-13
+
+### Added
+
+- **Cowork support (Claude desktop app).** Transcript discovery now falls back
+  to the Cowork sandbox mount (`<mount>/.claude/projects/…` and
+  `/sessions/*/mnt/.claude/projects/…`) when no Claude Code project directory
+  matches the cwd; Claude Code keeps priority when both are present.
+- **Per-skill attribution.** Skills invoked mid-turn via the Skill tool (how
+  Cowork runs them, rather than a `<command-name>` prompt) each get their own
+  sticky segment, deduped by tool-use id so streamed duplicates don't reopen or
+  double-count them.
 
 ## [0.2.0] — 2026-06-12
 
@@ -120,7 +125,8 @@ Initial release.
 - Standalone CLI: `python3 scripts/token_usage.py report|json [transcript]`.
 - Optional statusline example (`examples/statusline.sh`, requires `jq`).
 
-[Unreleased]: https://github.com/WizzoUK2/token-usage/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/WizzoUK2/token-usage/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/WizzoUK2/token-usage/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/WizzoUK2/token-usage/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/WizzoUK2/token-usage/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/WizzoUK2/token-usage/compare/v0.1.0...v0.1.1
