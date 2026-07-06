@@ -16,7 +16,7 @@ via the plugin directory submission form: https://clau.de/plugin-directory-submi
   "source": {
     "source": "url",
     "url": "https://github.com/WizzoUK2/token-usage.git",
-    "sha": "e6a5ed7c9d67a3ded328eb3bc31e87360a2c0681"
+    "sha": "ee04f6245ce264cb752d328e6d34b72425ff90e9"
   },
   "homepage": "https://github.com/WizzoUK2/token-usage"
 }
@@ -47,11 +47,13 @@ reconcile.
 Attribution is sticky (a command owns every turn until the next one) and works
 in Cowork too, where skills run via the Skill tool rather than slash-command
 prompts. Beyond the per-session report: `history` rolls up across all sessions
-by project, day, or command (incremental cache, near-instant warm scans);
-`--diff` compares two transcripts per label for before/after prompt
-optimisation; `--agents` breaks a command down by agent type. A Stop hook
-maintains a live per-session ledger (`~/.cache/token-usage/`) powering instant
-reports, an optional statusline segment, and an opt-in one-shot budget nudge.
+by project, day, command, or model, with a `--project` filter, `--csv` export,
+and a burn-rate footer (incremental cache, near-instant warm scans); `--diff`
+compares two transcripts per label for before/after prompt optimisation;
+`--agents` and `--models` break a command down by agent type or model. Stop
+and SubagentStop hooks maintain a live per-session ledger
+(`~/.cache/token-usage/`) powering instant reports, an optional statusline
+segment, and opt-in budget nudges that re-warn at each budget multiple.
 Cost estimates are per-model and cache-aware (cache reads 0.1x, 5-minute cache
 writes 1.25x, 1-hour writes 2x input rate), clearly labelled as API-price
 estimates for subscription users.
