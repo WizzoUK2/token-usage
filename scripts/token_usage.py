@@ -323,6 +323,14 @@ def agents_by_type(subagents, pricing):
     return sorted(out, key=lambda g: -(g["cost_usd"] or g["usage"]["output"] / 1e6))
 
 
+def models_breakdown(by_model, pricing):
+    """Per-model rows (subsets of the containing total) with summed usage and cost."""
+    out = [{"model": m, "usage": dict(bucket),
+            "cost_usd": cost_usd({m: bucket}, pricing)}
+           for m, bucket in by_model.items()]
+    return sorted(out, key=lambda r: -(r["cost_usd"] or r["usage"]["output"] / 1e6))
+
+
 def aggregate(segments, pricing):
     by_label, total_by_model = {}, {}
     for seg in segments:
@@ -338,6 +346,7 @@ def aggregate(segments, pricing):
         agg["usage"] = sum_buckets(agg["by_model"])
         agg["cost_usd"] = cost_usd(agg["by_model"], pricing)
         agg["agents"] = agents_by_type(agg.pop("_subagents", []), pricing)
+        agg["models"] = models_breakdown(agg["by_model"], pricing)
     return {
         "by_label": by_label,
         "total": {
@@ -376,7 +385,7 @@ def fmt_cost_delta(c):
     return f"{'-' if c < 0 else '+'}${abs(c):.2f}"
 
 
-def render_report(data, show_agents=False):
+def render_report(data, show_agents=False, show_models=False):
     lines = [
         "| Activity | Calls | Output | Input | Cache read | Cache write | Est. cost |",
         "|---|---:|---:|---:|---:|---:|---:|",
@@ -395,6 +404,14 @@ def render_report(data, show_agents=False):
             f"| {fmt_tokens(u['cache_read'])} | {fmt_tokens(u['cache_5m'] + u['cache_1h'])} "
             f"| {fmt_cost(agg['cost_usd'])} |"
         )
+        if show_models and agg.get("models"):
+            for m in agg["models"]:
+                mu = m["usage"]
+                lines.append(
+                    f"| ↳ {m['model']} | | {fmt_tokens(mu['output'])} | {fmt_tokens(mu['input'])} "
+                    f"| {fmt_tokens(mu['cache_read'])} | {fmt_tokens(mu['cache_5m'] + mu['cache_1h'])} "
+                    f"| {fmt_cost(m['cost_usd'])} |"
+                )
         if show_agents and agg.get("agents"):
             for g in agg["agents"]:
                 gu = g["usage"]
@@ -687,6 +704,7 @@ def main():
         p.add_argument("transcript", nargs="?", default=None)
         if name == "report":
             p.add_argument("--agents", action="store_true")
+            p.add_argument("--models", action="store_true")
         p.add_argument("--diff", nargs=2, metavar=("OLD", "NEW"), default=None)
     sub.add_parser("hook")
     h = sub.add_parser("history")
@@ -704,8 +722,8 @@ def main():
     if getattr(args, "diff", None):
         if getattr(args, "transcript", None):
             sys.exit("token-usage: --diff ignores TRANSCRIPT — pass exactly two paths to --diff")
-        if getattr(args, "agents", False):
-            sys.exit("token-usage: --diff and --agents cannot be combined")
+        if getattr(args, "agents", False) or getattr(args, "models", False):
+            sys.exit("token-usage: --diff cannot be combined with --agents or --models")
         d = diff_data(Path(args.diff[0]), Path(args.diff[1]), load_pricing())
         print(json.dumps(d, indent=1) if args.cmd == "json" else render_diff(d))
         return
@@ -715,7 +733,8 @@ def main():
     if args.cmd == "json":
         print(json.dumps(data, indent=1))
     else:
-        print(render_report(data, show_agents=getattr(args, "agents", False)))
+        print(render_report(data, show_agents=getattr(args, "agents", False),
+                            show_models=getattr(args, "models", False)))
 
 
 if __name__ == "__main__":
