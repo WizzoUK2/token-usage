@@ -109,6 +109,16 @@ def test_budget_multiple_survives_legacy_bool_ledger(tmp_path):
     assert r.stdout.strip() == ""                          # 1x was already notified
 
 
+def test_hooks_json_registers_stop_and_subagent_stop():
+    # SubagentStop keeps the ledger (and statusline) fresh during long
+    # agent-heavy turns instead of only at turn end.
+    hooks = json.loads((SCRIPT.parent.parent / "hooks" / "hooks.json").read_text())
+    events = hooks["hooks"]
+    assert set(events) >= {"Stop", "SubagentStop"}
+    commands = {e: events[e][0]["hooks"][0]["command"] for e in ("Stop", "SubagentStop")}
+    assert commands["Stop"] == commands["SubagentStop"]
+
+
 def test_hook_recovers_from_non_dict_ledger(tmp_path):
     t = make_transcript(tmp_path)
     payload = {"session_id": "bud-4", "transcript_path": str(t)}
