@@ -6,6 +6,38 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-07-06
+
+### Fixed
+
+- **Pricing:** added `claude-sonnet-5` ($3/$15) and `claude-mythos-5`
+  ($10/$50) to the bundled table — Sonnet 5 usage previously rendered `—`
+  and was silently excluded from cost totals.
+- Model-pricing prefix matching now stops at segment boundaries, so a
+  future `claude-opus-4-10` falls through to the `claude-opus-4` family
+  rate instead of mispricing against `claude-opus-4-1`.
+- Project auto-discovery slugs the cwd with Claude Code's actual rule
+  (every non-alphanumeric character → dash), fixing paths with spaces.
+
+### Added
+
+- `report --models` — per-model ↳ breakdown rows (subsets of the parent
+  row); `json` output gains `models` arrays per label unconditionally.
+- `history --by model` — cross-session rollup by model (calls = API
+  requests). Index schema v2 caches per-model buckets; v1 entries
+  re-parse once on the first scan after upgrading.
+- `history --project SUBSTR` — substring filter composable with any `--by`.
+- `history --csv` — raw-number CSV export.
+- Burn-rate footer on `history --since Nd`: average $/day and projected
+  $/week for the window.
+- Budget nudges re-warn at each further multiple of
+  `TOKEN_USAGE_BUDGET_USD` (2×, 3×, …); ledgers track
+  `budget_notified_multiple` (legacy `budget_notified` bools read as
+  1×-already-sent).
+- The ledger hook also runs on `SubagentStop`, keeping the statusline
+  fresh during long agent-heavy turns. (Measured: full parse of a 74MB
+  transcript takes ~0.3s, so incremental parsing remains unnecessary.)
+
 ## [0.2.0] — 2026-06-12
 
 ### Changed
@@ -63,7 +95,8 @@ Initial release.
 - Standalone CLI: `python3 scripts/token_usage.py report|json [transcript]`.
 - Optional statusline example (`examples/statusline.sh`, requires `jq`).
 
-[Unreleased]: https://github.com/WizzoUK2/token-usage/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/WizzoUK2/token-usage/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/WizzoUK2/token-usage/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/WizzoUK2/token-usage/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/WizzoUK2/token-usage/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/WizzoUK2/token-usage/releases/tag/v0.1.0

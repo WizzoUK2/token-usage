@@ -1,9 +1,9 @@
 ---
 name: report
-description: Generate a per-command breakdown of Claude Code token usage and estimated API cost for the current or a past session, including subagent rollups, per-agent-type breakdown, cross-session history, compare mode, and budget nudge status. This skill should be used when the user asks "where did my tokens go", "token usage report", "how many tokens did that command use", "what did this session cost", "which command/subagent used the most tokens", "show me token history", "what did I spend this week", "token history by day/project/command", or "compare token usage between two sessions".
+description: Generate a per-command breakdown of Claude Code token usage and estimated API cost for the current or a past session, including subagent rollups, per-agent-type and per-model breakdowns, cross-session history with burn rate, compare mode, and budget nudge status. This skill should be used when the user asks "where did my tokens go", "token usage report", "how many tokens did that command use", "what did this session cost", "which command/subagent/model used the most tokens", "show me token history", "what did I spend this week", "what's my burn rate", "token history by day/project/command/model", or "compare token usage between two sessions".
 argument-hint: "[transcript-path]"
 allowed-tools: Bash, Read
-version: 0.2.0
+version: 0.3.0
 ---
 
 # token-usage report
@@ -21,6 +21,9 @@ python3 "<plugin-root>/scripts/token_usage.py" report [transcript-path]
 # Add per-agent-type ↳ breakdown rows (subsets of parent row, not additive)
 python3 "<plugin-root>/scripts/token_usage.py" report --agents [transcript-path]
 
+# Add per-model ↳ breakdown rows (also subsets of the parent row)
+python3 "<plugin-root>/scripts/token_usage.py" report --models [transcript-path]
+
 # Compare two transcripts — per-label cost and output deltas
 python3 "<plugin-root>/scripts/token_usage.py" report --diff OLD.jsonl NEW.jsonl
 
@@ -31,12 +34,12 @@ python3 "<plugin-root>/scripts/token_usage.py" json [transcript-path]
 python3 "<plugin-root>/scripts/token_usage.py" json --diff OLD.jsonl NEW.jsonl
 
 # Cross-session history
-python3 "<plugin-root>/scripts/token_usage.py" history [--by project|day|command] [--since 7d|DATE] [--json]
+python3 "<plugin-root>/scripts/token_usage.py" history [--by project|day|command|model] [--since 7d|DATE] [--project SUBSTR] [--json|--csv]
 ```
 
 - With no argument, `report` and `json` auto-discover the most recently modified session transcript for the current working directory's project (`~/.claude/projects/<cwd-slug>/*.jsonl`) — normally the live session.
 - If the user supplied a path, treat it as the transcript path (a session's `.jsonl`) and pass it through.
-- For `history`, `--since` accepts relative values (`7d`, `30d`) or ISO dates (`2026-06-01`). `--by` defaults to `project`.
+- For `history`, `--since` accepts relative values (`7d`, `30d`) or ISO dates (`2026-06-01`). `--by` defaults to `project`. `--project` is a substring filter that composes with any `--by`. Relative `--since` windows append a burn-rate footer (avg $/day, projected $/week).
 
 A live ledger may also exist at `~/.cache/token-usage/<session-id>.json` (maintained by this plugin's Stop hook). Prefer running the script fresh — it is fast (~1s) and always current mid-turn; the ledger only updates at turn boundaries.
 
@@ -48,9 +51,9 @@ A live ledger may also exist at `~/.cache/token-usage/<session-id>.json` (mainta
 2. Add one or two sentences of interpretation: name the biggest consumer and anything notable (e.g. a single command dominating cost, heavy subagent fan-out, unusually low cache-read ratio).
 3. Keep the script's pricing disclaimer line — costs are API-price estimates and subscription (Max/Pro) users are not billed per token.
 
-### For `report --agents`
+### For `report --agents` / `report --models`
 
-Show the full table including the ↳ indented agent-type rows. Clarify to the user that ↳ rows are **subsets** of their parent row's totals — they do not add to the parent, they break it down.
+Show the full table including the ↳ indented rows. Clarify to the user that ↳ rows (agent types or models) are **subsets** of their parent row's totals — they do not add to the parent, they break it down. Use `--models` when the user asks which model consumed the tokens (e.g. Opus main loop vs Haiku subagents).
 
 ### For `report --diff` / `json --diff`
 
@@ -58,7 +61,7 @@ Show the diff output verbatim. Note that `—` in a delta column means one side 
 
 ### For `history`
 
-Show the table verbatim. If the user asked about spending over a time period (e.g. "what did I spend this week"), use `--since 7d` and `--by day`. If asking about a specific project, use `--by project`. If asking about command patterns, use `--by command`.
+Show the table verbatim. If the user asked about spending over a time period (e.g. "what did I spend this week"), use `--since 7d` and `--by day`. If asking about a specific project, use `--by project` (or `--project SUBSTR` to filter to it). If asking about command patterns, use `--by command`. If asking which models cost the most, use `--by model`. If asked for a spreadsheet/export, use `--csv`.
 
 ## Interpreting the columns
 
