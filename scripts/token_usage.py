@@ -4,9 +4,11 @@
 Parses Claude Code session transcripts (~/.claude/projects/<project>/<session>.jsonl),
 deduplicates streamed usage entries by requestId (taking per-field maxima, since
 streamed duplicates may carry partial usage snapshots), segments the session at
-slash-command invocations (a command owns all turns until the next command),
-rolls subagent transcripts up into the segment that spawned them, and prices
-the result against a bundled pricing table.
+slash-command invocations — or Skill tool_use blocks in Cowork (the Claude
+desktop app) — where each owns all turns until the next, rolls subagent
+transcripts up into the segment that spawned them, and prices the result against
+a bundled pricing table. Transcript discovery falls back to the Cowork sandbox
+mount when no Claude Code project directory matches the cwd.
 
 Subcommands:
     report [TRANSCRIPT]   Markdown breakdown table (default: latest session in cwd project)
@@ -236,6 +238,7 @@ def parse_session(transcript_path):
         })
 
     pending = {}  # requestId -> (segment, model, flat maxima); segment = first occurrence's
+    seen_skill_uses = set()  # Skill tool_use ids already segmented (Cowork)
     for entry in iter_jsonl(transcript_path):
         if is_user_prompt(entry):
             text = text_of((entry.get("message") or {}).get("content"))
@@ -253,6 +256,21 @@ def parse_session(transcript_path):
         if entry.get("type") != "assistant":
             continue
         msg = entry.get("message") or {}
+        # Cowork (Claude desktop app): skills are invoked mid-turn via the Skill
+        # tool rather than a <command-name> user prompt. Give each skill its own
+        # segment (sticky until the next command/skill), deduped by tool-use id
+        # so streamed duplicates don't reopen it. Runs before the requestId dedup
+        # below because a streamed duplicate may carry the same tool_use block.
+        content = msg.get("content")
+        if isinstance(content, list):
+            for block in content:
+                if (isinstance(block, dict) and block.get("type") == "tool_use"
+                        and block.get("name") == "Skill"):
+                    skill = (block.get("input") or {}).get("skill")
+                    use_id = block.get("id") or f"{entry.get('requestId')}:{skill}"
+                    if skill and use_id not in seen_skill_uses:
+                        seen_skill_uses.add(use_id)
+                        new_segment("/" + str(skill), entry.get("timestamp"))
         usage = msg.get("usage")
         if not usage:
             continue
@@ -671,11 +689,26 @@ def project_slug(path_str):
 
 
 def find_latest_transcript():
+    # 1) Claude Code: ~/.claude/projects/<cwd-slug>/*.jsonl
     project_dir = Path.home() / ".claude" / "projects" / project_slug(str(Path.cwd()))
-    if not project_dir.is_dir():
-        return None
-    files = sorted(project_dir.glob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
-    return files[0] if files else None
+    if project_dir.is_dir():
+        files = sorted(project_dir.glob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
+        if files:
+            return files[0]
+    # 2) Cowork (Claude desktop app): the sandbox mounts the live session's
+    #    transcript read-only under <mount>/.claude/projects/<slug>/<session>.jsonl.
+    #    Only the current session's project is present, so take the newest .jsonl.
+    cowork_roots = [Path.home() / "mnt" / ".claude" / "projects"]
+    sessions = Path("/sessions")
+    if sessions.is_dir():
+        cowork_roots.extend(sorted(sessions.glob("*/mnt/.claude/projects")))
+    for root in cowork_roots:
+        if not root.is_dir():
+            continue
+        files = sorted(root.glob("*/*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
+        if files:
+            return files[0]
+    return None
 
 
 def resolve_transcript(arg):
