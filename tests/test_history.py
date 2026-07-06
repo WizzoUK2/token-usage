@@ -104,6 +104,20 @@ def test_history_by_model(tu, tmp_path, monkeypatch):
     assert by_key["claude-haiku-4-5"]["usage"]["output"] == 75
     assert by_key["claude-haiku-4-5"]["calls"] == 2          # API requests
     assert by_key["claude-fable-5"]["cost_usd"] > by_key["claude-haiku-4-5"]["cost_usd"]
+    # The count column means API requests here, not sessions — label it so.
+    assert "| Model | Requests |" in tu.render_history(rows)
+    assert tu.render_history_csv(rows).splitlines()[0].startswith("model,requests,")
+
+
+def test_since_rejects_malformed_values(tu, tmp_path, monkeypatch):
+    import pytest
+    seed_projects(tmp_path, monkeypatch)
+    for bad in ("week", "7", "last-tuesday"):
+        with pytest.raises(SystemExit):
+            tu.run_history(by="project", since=bad)
+    # Valid forms still pass.
+    assert tu.run_history(by="project", since="7d") is not None
+    assert tu.run_history(by="project", since="2026-06-01") is not None
 
 
 def test_history_project_filter_composes_with_by(tu, tmp_path, monkeypatch):

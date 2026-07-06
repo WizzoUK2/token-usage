@@ -37,6 +37,23 @@ adheres to [Semantic Versioning](https://semver.org/).
 - The ledger hook also runs on `SubagentStop`, keeping the statusline
   fresh during long agent-heavy turns. (Measured: full parse of a 74MB
   transcript takes ~0.3s, so incremental parsing remains unnecessary.)
+  SubagentStop payloads carry the subagent's own sidechain transcript, so
+  the hook resolves the owning session transcript and re-aggregates the
+  whole session; if it can't be found, it writes nothing rather than
+  clobbering the ledger. Because SubagentStop hooks run in parallel,
+  ledger temp files are per-process and budget nudges only fire (and only
+  advance the multiple counter) from the serial Stop hook.
+
+### Changed
+
+- Budget nudge messages name the actual multiple crossed — a session
+  first reporting in at $25 on a $10 budget says "2× your $10.00 budget".
+  Non-positive `TOKEN_USAGE_BUDGET_USD` values are now inert (previously
+  `0` warned once on any spend).
+- `--since` values that are neither `Nd` nor `YYYY-MM-DD` now exit with
+  an error instead of silently filtering out every session.
+- `history --by model` labels its count column **Requests** (API
+  requests), since the other groupings count sessions/invocations.
 
 ## [0.2.0] — 2026-06-12
 

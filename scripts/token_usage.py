@@ -354,6 +354,7 @@ def aggregate(segments, pricing):
             "cost_usd": cost_usd(total_by_model, pricing),
             "cache_savings_usd": cache_savings_usd(total_by_model, pricing),
             "models": sorted(total_by_model),
+            "by_model": total_by_model,
         },
         "segments": [
             {**{k: s[k] for k in ("label", "start_ts", "prompt")},
@@ -385,6 +386,13 @@ def fmt_cost_delta(c):
     return f"{'-' if c < 0 else '+'}${abs(c):.2f}"
 
 
+def sub_row(label, u, cost):
+    """One ↳ breakdown row (a subset of its parent row) for the report table."""
+    return (f"| ↳ {label} | | {fmt_tokens(u['output'])} | {fmt_tokens(u['input'])} "
+            f"| {fmt_tokens(u['cache_read'])} | {fmt_tokens(u['cache_5m'] + u['cache_1h'])} "
+            f"| {fmt_cost(cost)} |")
+
+
 def render_report(data, show_agents=False, show_models=False):
     lines = [
         "| Activity | Calls | Output | Input | Cache read | Cache write | Est. cost |",
@@ -405,21 +413,11 @@ def render_report(data, show_agents=False, show_models=False):
             f"| {fmt_cost(agg['cost_usd'])} |"
         )
         if show_models and agg.get("models"):
-            for m in agg["models"]:
-                mu = m["usage"]
-                lines.append(
-                    f"| ↳ {m['model']} | | {fmt_tokens(mu['output'])} | {fmt_tokens(mu['input'])} "
-                    f"| {fmt_tokens(mu['cache_read'])} | {fmt_tokens(mu['cache_5m'] + mu['cache_1h'])} "
-                    f"| {fmt_cost(m['cost_usd'])} |"
-                )
+            lines += [sub_row(m["model"], m["usage"], m["cost_usd"])
+                      for m in agg["models"]]
         if show_agents and agg.get("agents"):
-            for g in agg["agents"]:
-                gu = g["usage"]
-                lines.append(
-                    f"| ↳ {g['type']} ×{g['count']} | | {fmt_tokens(gu['output'])} | {fmt_tokens(gu['input'])} "
-                    f"| {fmt_tokens(gu['cache_read'])} | {fmt_tokens(gu['cache_5m'] + gu['cache_1h'])} "
-                    f"| {fmt_cost(g['cost_usd'])} |"
-                )
+            lines += [sub_row(f"{g['type']} ×{g['count']}", g["usage"], g["cost_usd"])
+                      for g in agg["agents"]]
     t = data["total"]
     u = t["usage"]
     lines.append(
@@ -498,9 +496,6 @@ def summarize_transcript(path, pricing, st=None):
     st = st or path.stat()
     segs = parse_session(path)
     data = aggregate(segs, pricing)
-    total_by_model = {}
-    for seg in segs:
-        merge_by_model(total_by_model, seg["by_model"])
     return {
         "version": INDEX_VERSION, "path": str(path),
         "mtime_ns": st.st_mtime_ns, "size": st.st_size,
@@ -509,7 +504,7 @@ def summarize_transcript(path, pricing, st=None):
         "by_label": {label: {"usage": agg["usage"], "cost_usd": agg["cost_usd"],
                              "invocations": agg["invocations"]}
                      for label, agg in data["by_label"].items()},
-        "by_model": total_by_model,
+        "by_model": data["total"]["by_model"],
         "total": {"usage": data["total"]["usage"],
                   "cost_usd": data["total"]["cost_usd"]},
     }
@@ -535,16 +530,26 @@ def cached_summary(path, pricing):
     return s, False
 
 
+def _since_days(arg):
+    """Day count of a relative 'Nd' --since value, or None if not that form."""
+    m = re.fullmatch(r"(\d+)d", arg or "")
+    return int(m.group(1)) if m else None
+
+
 def since_cutoff(arg):
-    """'7d' -> ISO instant 7 days ago; ISO strings pass through. None -> None."""
+    """'7d' -> ISO instant 7 days ago; ISO dates pass through; junk errors out."""
     if not arg:
         return None
-    m = re.fullmatch(r"(\d+)d", arg)
-    if m:
+    days = _since_days(arg)
+    if days is not None:
         from datetime import datetime, timedelta, timezone
         return (datetime.now(timezone.utc)
-                - timedelta(days=int(m.group(1)))).strftime("%Y-%m-%dT%H:%M:%SZ")
-    return arg
+                - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}([T ].*)?", arg):
+        return arg
+    # Anything else would string-compare against ISO timestamps and silently
+    # filter out every session — reject loudly instead.
+    sys.exit(f"token-usage: invalid --since value {arg!r} — use Nd (e.g. 7d) or YYYY-MM-DD")
 
 
 def _local_day(ts):
@@ -605,12 +610,11 @@ def run_history(by="project", since=None, project=None):
 
 def burn_rate_line(total_cost, since):
     """Projection footer for a relative --since window; None when not applicable."""
-    if total_cost is None or not since:
+    if total_cost is None:
         return None
-    m = re.fullmatch(r"(\d+)d", since)
-    if not m or int(m.group(1)) == 0:
+    days = _since_days(since)
+    if not days:
         return None
-    days = int(m.group(1))
     per_day = total_cost / days
     return (f"Burn rate: ~${per_day:.2f}/day over the last {days}d "
             f"(≈ ${per_day * 7:.2f}/week at this pace).")
@@ -621,7 +625,8 @@ def render_history_csv(data):
     import io
     buf = io.StringIO()
     w = csv.writer(buf, lineterminator="\n")
-    w.writerow([data["by"], "calls", "output", "input",
+    calls_col = "requests" if data["by"] == "model" else "calls"
+    w.writerow([data["by"], calls_col, "output", "input",
                 "cache_read", "cache_5m", "cache_1h", "cost_usd"])
     for r in data["rows"]:
         u = r["usage"]
@@ -634,7 +639,9 @@ def render_history_csv(data):
 def render_history(data):
     head = {"project": "Project", "day": "Day",
             "command": "Command", "model": "Model"}[data["by"]]
-    lines = [f"| {head} | Calls | Output | Input | Cache read | Cache write | Est. cost |",
+    # Per-model counts are API requests, not sessions/invocations.
+    calls_head = "Requests" if data["by"] == "model" else "Calls"
+    lines = [f"| {head} | {calls_head} | Output | Input | Cache read | Cache write | Est. cost |",
              "|---|---:|---:|---:|---:|---:|---:|"]
     total = empty_usage()
     total_cost, calls = None, 0
@@ -692,6 +699,16 @@ def run_hook():
     session_id = re.sub(r"[^A-Za-z0-9_-]", "", str(payload.get("session_id", "unknown"))) or "unknown"
     if not transcript or not Path(transcript).exists():
         return 0
+    transcript = Path(transcript)
+    if transcript.parent.name == "subagents":
+        # SubagentStop delivers the subagent's own sidechain transcript; find
+        # the owning session transcript and re-aggregate the whole session.
+        main = next((p / f"{session_id}.jsonl" for p in transcript.parents
+                     if (p / f"{session_id}.jsonl").is_file()), None)
+        if main is None:
+            return 0  # never ledger sidechain-only data under the session id
+        transcript = main
+    is_subagent_stop = payload.get("hook_event_name") == "SubagentStop"
     try:
         data = aggregate(parse_session(transcript), load_pricing())
         data["session_id"] = session_id
@@ -718,25 +735,30 @@ def run_hook():
             pass
         cost = data["total"]["cost_usd"]
         multiple = int(cost // limit) if (limit and limit > 0 and cost is not None) else 0
-        fire = multiple > prior_multiple
-        notified = max(multiple, prior_multiple) if fire else prior_multiple
+        # Parallel SubagentStop hooks race the ledger read-modify-write, so
+        # only the (serial) Stop hook fires nudges and advances the counter.
+        fire = multiple > prior_multiple and not is_subagent_stop
+        notified = multiple if fire else prior_multiple
         data["budget_notified"] = notified >= 1
         data["budget_notified_multiple"] = notified
 
-        tmp = ledger.with_suffix(".tmp")
+        # Per-process temp names: concurrent SubagentStop hooks must never
+        # interleave writes into a shared temp file.
+        tmp = ledger.with_suffix(f".{os.getpid()}.tmp")
         tmp.write_text(json.dumps(data, indent=1))
         tmp.replace(ledger)
-        (LEDGER_DIR / "latest.json").unlink(missing_ok=True)
+        link_tmp = LEDGER_DIR / f".latest.{os.getpid()}.tmp"
         try:
-            (LEDGER_DIR / "latest.json").symlink_to(ledger)
+            link_tmp.symlink_to(ledger)
+            link_tmp.replace(LEDGER_DIR / "latest.json")
         except OSError:
-            pass
+            link_tmp.unlink(missing_ok=True)
         if fire:
             top = "—"
             if data["by_label"]:
                 top = max(data["by_label"].items(),
                           key=lambda kv: kv[1]["cost_usd"] or 0)[0]
-            passed = (f"{multiple}× your ${limit:.2f} budget" if prior_multiple >= 1
+            passed = (f"{multiple}× your ${limit:.2f} budget" if multiple >= 2
                       else f"your ${limit:.2f} budget")
             print(json.dumps({"systemMessage":
                 f"token-usage: session estimate ${cost:.2f} has passed "

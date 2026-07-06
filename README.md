@@ -105,7 +105,7 @@ Set `TOKEN_USAGE_BUDGET_USD` in the environment Claude Code runs hooks with (e.g
 }
 ```
 
-When the session's estimated cost crosses the threshold the Stop hook emits a `systemMessage` warning, and warns again each time a further multiple of the budget is crossed (2×, 3×, …) — one warning per multiple. The same API-price-estimate disclaimer applies — this is a usage signal, not a billing alert.
+When the session's estimated cost crosses the threshold the Stop hook emits a `systemMessage` warning, and warns again each time a further multiple of the budget is crossed (2×, 3×, …) — one warning per multiple, naming the multiple actually crossed. The budget must be a positive number. The same API-price-estimate disclaimer applies — this is a usage signal, not a billing alert.
 
 ### Statusline (optional)
 
