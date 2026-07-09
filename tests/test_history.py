@@ -245,3 +245,20 @@ def test_v2_index_entry_reparses_once(tu, monkeypatch, tmp_path):
     assert not hit2 and s2["version"] == 3 and "by_day" in s2   # re-parsed
     s3, hit3 = tu.cached_summary(t, tu.load_pricing())
     assert hit3                                                  # now cached
+
+
+def test_history_by_day_splits_sessions_across_days(tu, monkeypatch, tmp_path):
+    monkeypatch.setenv("TOKEN_USAGE_PROJECTS_DIR", str(tmp_path / "projects"))
+    monkeypatch.setenv("TOKEN_USAGE_LEDGER_DIR", str(tmp_path / "cache"))
+    write_jsonl(tmp_path / "projects" / "p" / "s.jsonl", [
+        user("2026-07-01T10:00:00Z"),
+        assistant("2026-07-01T10:00:05Z", usage(out=100), request_id="r1"),
+        assistant("2026-07-02T12:00:00Z", usage(out=300), request_id="r2"),
+    ])
+    data = tu.run_history(by="day")
+    rows = {r["key"]: r for r in data["rows"]}
+    assert len(rows) == 2
+    day1, day2 = sorted(rows)
+    assert rows[day1]["usage"]["output"] == 100
+    assert rows[day2]["usage"]["output"] == 300
+    assert rows[day1]["calls"] == 1 and rows[day2]["calls"] == 1  # touches both days

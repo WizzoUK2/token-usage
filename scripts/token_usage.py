@@ -705,7 +705,10 @@ def run_history(by="project", since=None, project=None):
         if by == "project":
             add_row(s["project"], s["total"]["usage"], s["total"]["cost_usd"], 1)
         elif by == "day":
-            add_row(_local_day(s["first_ts"]), s["total"]["usage"], s["total"]["cost_usd"], 1)
+            # Sessions split across the local-time days they actually touched;
+            # the calls column counts sessions touching that day.
+            for day, b in s.get("by_day", {}).items():
+                add_row(day, b["usage"], b["cost_usd"], 1)
         elif by == "model":
             for model, bucket in s.get("by_model", {}).items():
                 add_row(model, bucket, cost_usd({model: bucket}, pricing),
