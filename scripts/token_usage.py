@@ -780,6 +780,75 @@ def render_history(data):
     return "\n".join(lines)
 
 
+# --- Insights ---------------------------------------------------------------
+# Thresholds are maintainer-tunable constants, deliberately not user-config
+# (YAGNI until someone asks). Every rule must state an action, not just an
+# observation; rules needing a baseline skip silently when it is too thin.
+INSIGHT_MIN_BASELINE_SESSIONS = 5   # baseline rules need this many prior sessions
+INSIGHT_OUTLIER_WARN = 3.0          # session cost >= 3x project median -> warn
+INSIGHT_OUTLIER_INFO = 2.0          # session cost >= 2x project median -> info
+INSIGHT_CACHE_DROP_PP = 0.20        # cache-read ratio 20pp below command norm -> warn
+INSIGHT_ADHOC_SHARE = 0.50          # (no command) >= 50% of session cost -> info
+INSIGHT_AGENT_SHARE = 0.70          # subagents >= 70% of a command's cost -> info
+INSIGHT_BUDGET_PACE = 0.75          # >= 75% of TOKEN_USAGE_BUDGET_USD -> info
+INSIGHT_TREND_WARN = 0.50           # window spend up >= 50% half-over-half -> warn
+INSIGHT_TREND_INFO = 0.25           # window spend +/- 25% half-over-half -> info
+INSIGHT_MOVER_SHARE = 0.30          # one label explains >= 30% of the increase -> info
+
+
+def finding(rule, severity, message, **data):
+    return {"rule": rule, "severity": severity, "message": message, "data": data}
+
+
+def cache_ratio(u):
+    """Share of prompt tokens served from cache; None when there were none."""
+    denom = u["cache_read"] + u["input"] + u["cache_5m"] + u["cache_1h"]
+    return u["cache_read"] / denom if denom else None
+
+
+def _median(xs):
+    xs = sorted(xs)
+    n = len(xs)
+    if not n:
+        return None
+    mid = n // 2
+    return xs[mid] if n % 2 else (xs[mid - 1] + xs[mid]) / 2
+
+
+def compute_baseline(pricing, project, days=30, exclude=None):
+    """Per-project norms from the history index (median session cost; per-command
+    median cost and cache-read ratio) over the trailing `days`, excluding the
+    transcript at `exclude` (the session being analysed)."""
+    cutoff = since_cutoff(f"{days}d")
+    session_costs, commands = [], {}
+    for f in sorted(projects_dir().glob("*/*.jsonl")):
+        try:
+            s, _ = cached_summary(f, pricing)
+        except OSError:
+            continue
+        if exclude and s["path"] == exclude:
+            continue
+        if (s["first_ts"] or "") < cutoff or s["project"] != project:
+            continue
+        if s["total"]["cost_usd"] is not None:
+            session_costs.append(s["total"]["cost_usd"])
+        for label, agg in s["by_label"].items():
+            c = commands.setdefault(label, {"costs": [], "ratios": []})
+            if agg["cost_usd"] is not None:
+                c["costs"].append(agg["cost_usd"])
+            r = cache_ratio(agg["usage"])
+            if r is not None:
+                c["ratios"].append(r)
+    return {
+        "sessions": len(session_costs),
+        "median_session_cost": _median(session_costs),
+        "commands": {label: {"sessions": len(c["costs"]),
+                             "median_cost": _median(c["costs"]),
+                             "median_cache_ratio": _median(c["ratios"])}
+                     for label, c in commands.items()},
+    }
+
+
 def project_slug(path_str):
     # Claude Code slugs project paths by replacing every non-alphanumeric
     # character with a dash (not just / . _).
