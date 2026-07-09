@@ -1,6 +1,6 @@
 {
   "name": "token-usage",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Attribute Claude Code and Cowork token usage to the work that consumed it \u2014 per-command, per-skill, per-agent and per-model breakdowns, cross-session history, live session ledger, and cost estimates",
   "author": {
     "name": "Craig Fletcher",

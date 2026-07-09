@@ -51,14 +51,43 @@ CACHE_5M_MULT = 1.25
 CACHE_1H_MULT = 2.0
 
 
+def user_pricing_path():
+    """User pricing overlay location ($XDG_CONFIG_HOME/token-usage/pricing.json)."""
+    base = os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
+    return Path(base) / "token-usage" / "pricing.json"
+
+
+def _valid_rates(v):
+    return (isinstance(v, dict)
+            and isinstance(v.get("input"), (int, float)) and not isinstance(v.get("input"), bool)
+            and isinstance(v.get("output"), (int, float)) and not isinstance(v.get("output"), bool))
+
+
 def load_pricing():
+    """Three-layer per-model-key merge: defaults <- bundled <- user overlay.
+
+    A malformed layer (or a single invalid entry) is warned about once on
+    stderr and skipped — never fatal, because the Stop hook calls this."""
+    pricing = dict(DEFAULT_PRICING)
     bundled = Path(__file__).resolve().parent.parent / "data" / "pricing.json"
-    if bundled.exists():
+    for layer in (bundled, user_pricing_path()):
+        if not layer.exists():
+            continue
         try:
-            return json.loads(bundled.read_text())
-        except (json.JSONDecodeError, OSError):
-            pass
-    return DEFAULT_PRICING
+            data = json.loads(layer.read_text())
+        except (ValueError, OSError):
+            print(f"token-usage: ignoring malformed pricing file {layer}", file=sys.stderr)
+            continue
+        if not isinstance(data, dict):
+            print(f"token-usage: ignoring malformed pricing file {layer}", file=sys.stderr)
+            continue
+        for key, rates in data.items():
+            if _valid_rates(rates):
+                pricing[key] = rates
+            else:
+                print(f"token-usage: ignoring invalid rates for {key} in {layer}",
+                      file=sys.stderr)
+    return pricing
 
 
 # Bedrock-style IDs prepend an optional region and "anthropic." (us.anthropic.claude-...).
@@ -152,6 +181,20 @@ def cache_savings_usd(by_model, pricing):
     return total if priced else None
 
 
+def unpriced_models(by_model, pricing):
+    """Model IDs with recorded usage but no resolvable rates (costs understated)."""
+    return sorted(m for m, b in by_model.items()
+                  if rates_for(m, pricing) is None
+                  and any(b[k] for k in ("input", "output", "cache_read", "cache_5m", "cache_1h")))
+
+
+def unpriced_footnote(models):
+    if not models:
+        return None
+    return (f"{len(models)} model(s) unpriced ({', '.join(models)}): "
+            f"add rates to {user_pricing_path()}")
+
+
 def merge_by_model(dest, src):
     for model, bucket in src.items():
         d = dest.setdefault(model, empty_usage())
@@ -225,6 +268,42 @@ def sum_transcript(path):
     for model, flat in pending.values():
         add_flat(by_model.setdefault(model, empty_usage()), flat)
     return by_model, first_ts
+
+
+def sum_by_day(path):
+    """Per-local-day usage for one transcript file, deduped by requestId.
+
+    Returns {local_day: by_model}. A request keeps its first-seen timestamp's
+    day; requests with no timestamp fall into the file's first known day
+    ('unknown' if the file has no timestamps at all)."""
+    first_ts, by_day, pending = None, {}, {}  # pending: req -> (day|None, model, flat)
+    for entry in iter_jsonl(path):
+        ts = entry.get("timestamp")
+        if first_ts is None and ts:
+            first_ts = ts
+        if entry.get("type") != "assistant":
+            continue
+        msg = entry.get("message") or {}
+        usage = msg.get("usage")
+        if not usage:
+            continue
+        flat = normalize_usage(usage)
+        req = entry.get("requestId")
+        day = _local_day(ts) if ts else None   # None = resolve to first day at the end
+        model = msg.get("model") or "unknown"
+        if req and req in pending:
+            max_flat(pending[req][2], flat)
+        elif req:
+            pending[req] = (day, model, flat)
+        else:
+            add_flat(by_day.setdefault(day, {}).setdefault(model, empty_usage()), flat)
+    fallback = _local_day(first_ts)
+    out = {}
+    for day, models in by_day.items():
+        merge_by_model(out.setdefault(day or fallback, {}), models)
+    for day, model, flat in pending.values():
+        add_flat(out.setdefault(day or fallback, {}).setdefault(model, empty_usage()), flat)
+    return out
 
 
 def parse_session(transcript_path):
@@ -373,6 +452,7 @@ def aggregate(segments, pricing):
             "cache_savings_usd": cache_savings_usd(total_by_model, pricing),
             "models": sorted(total_by_model),
             "by_model": total_by_model,
+            "unpriced_models": unpriced_models(total_by_model, pricing),
         },
         "segments": [
             {**{k: s[k] for k in ("label", "start_ts", "prompt")},
@@ -448,6 +528,9 @@ def render_report(data, show_agents=False, show_models=False):
     savings = t.get("cache_savings_usd")
     if savings is not None and savings >= 0.01:
         lines.append(f"Prompt caching saved ~{fmt_cost(savings)} vs. full input rates.")
+    note = unpriced_footnote(t.get("unpriced_models") or [])
+    if note:
+        lines.append(note)
     lines.append(f"Models: {models}. Cost is an API-price estimate (cache-aware); "
                  "subscription plans are not billed per token.")
     return "\n".join(lines)
@@ -495,7 +578,7 @@ def render_diff(d):
     return "\n".join(lines)
 
 
-INDEX_VERSION = 2
+INDEX_VERSION = 3
 
 
 def projects_dir():
@@ -514,6 +597,12 @@ def summarize_transcript(path, pricing, st=None):
     st = st or path.stat()
     segs = parse_session(path)
     data = aggregate(segs, pricing)
+    day_models = sum_by_day(path)
+    subagents_dir = path.parent / path.stem / "subagents"
+    if subagents_dir.is_dir():
+        for agent_file in sorted(subagents_dir.glob("agent-*.jsonl")):
+            for day, models in sum_by_day(agent_file).items():
+                merge_by_model(day_models.setdefault(day, {}), models)
     return {
         "version": INDEX_VERSION, "path": str(path),
         "mtime_ns": st.st_mtime_ns, "size": st.st_size,
@@ -525,6 +614,9 @@ def summarize_transcript(path, pricing, st=None):
         "by_model": data["total"]["by_model"],
         "total": {"usage": data["total"]["usage"],
                   "cost_usd": data["total"]["cost_usd"]},
+        "by_day": {day: {"usage": sum_buckets(models),
+                         "cost_usd": cost_usd(models, pricing)}
+                   for day, models in day_models.items()},
     }
 
 
@@ -585,6 +677,7 @@ def run_history(by="project", since=None, project=None):
     pricing = load_pricing()
     cutoff = since_cutoff(since)
     rows = {}
+    unpriced = set()
 
     def add_row(key, usage_dict, cost, calls):
         r = rows.setdefault(key, {"key": key, "usage": empty_usage(),
@@ -610,10 +703,14 @@ def run_history(by="project", since=None, project=None):
             continue
         if project and project not in s["project"]:
             continue
+        unpriced.update(unpriced_models(s.get("by_model", {}), pricing))
         if by == "project":
             add_row(s["project"], s["total"]["usage"], s["total"]["cost_usd"], 1)
         elif by == "day":
-            add_row(_local_day(s["first_ts"]), s["total"]["usage"], s["total"]["cost_usd"], 1)
+            # Sessions split across the local-time days they actually touched;
+            # the calls column counts sessions touching that day.
+            for day, b in s.get("by_day", {}).items():
+                add_row(day, b["usage"], b["cost_usd"], 1)
         elif by == "model":
             for model, bucket in s.get("by_model", {}).items():
                 add_row(model, bucket, cost_usd({model: bucket}, pricing),
@@ -623,7 +720,7 @@ def run_history(by="project", since=None, project=None):
                 add_row(label, agg["usage"], agg["cost_usd"], agg["invocations"])
 
     ordered = sorted(rows.values(), key=lambda r: (-(r["cost_usd"] or 0), r["key"]))
-    return {"by": by, "since": since, "project": project, "rows": ordered}
+    return {"by": by, "since": since, "project": project, "rows": ordered, "unpriced_models": sorted(unpriced)}
 
 
 def burn_rate_line(total_cost, since):
@@ -679,7 +776,251 @@ def render_history(data):
     burn = burn_rate_line(total_cost, data.get("since"))
     if burn:
         lines += ["", burn]
+    note = unpriced_footnote(data.get("unpriced_models") or [])
+    if note:
+        lines += ["", note]
     return "\n".join(lines)
+
+
+# --- Insights ---------------------------------------------------------------
+# Thresholds are maintainer-tunable constants, deliberately not user-config
+# (YAGNI until someone asks). Every rule must state an action, not just an
+# observation; rules needing a baseline skip silently when it is too thin.
+INSIGHT_MIN_BASELINE_SESSIONS = 5   # baseline rules need this many prior sessions
+INSIGHT_OUTLIER_WARN = 3.0          # session cost >= 3x project median -> warn
+INSIGHT_OUTLIER_INFO = 2.0          # session cost >= 2x project median -> info
+INSIGHT_CACHE_DROP_PP = 0.20        # cache-read ratio 20pp below command norm -> warn
+INSIGHT_ADHOC_SHARE = 0.50          # (no command) >= 50% of session cost -> info
+INSIGHT_AGENT_SHARE = 0.70          # subagents >= 70% of a command's cost -> info
+INSIGHT_BUDGET_PACE = 0.75          # >= 75% of TOKEN_USAGE_BUDGET_USD -> info
+INSIGHT_TREND_WARN = 0.50           # window spend up >= 50% half-over-half -> warn
+INSIGHT_TREND_INFO = 0.25           # window spend +/- 25% half-over-half -> info
+INSIGHT_MOVER_SHARE = 0.30          # one label explains >= 30% of the increase -> info
+
+
+def finding(rule, severity, message, **data):
+    return {"rule": rule, "severity": severity, "message": message, "data": data}
+
+
+def cache_ratio(u):
+    """Share of prompt tokens served from cache; None when there were none."""
+    denom = u["cache_read"] + u["input"] + u["cache_5m"] + u["cache_1h"]
+    return u["cache_read"] / denom if denom else None
+
+
+def _median(xs):
+    xs = sorted(xs)
+    n = len(xs)
+    if not n:
+        return None
+    mid = n // 2
+    return xs[mid] if n % 2 else (xs[mid - 1] + xs[mid]) / 2
+
+
+def compute_baseline(pricing, project, days=30, exclude=None):
+    """Per-project norms from the history index (median session cost; per-command
+    median cost and cache-read ratio) over the trailing `days`, excluding the
+    transcript at `exclude` (the session being analysed)."""
+    cutoff = since_cutoff(f"{days}d")
+    session_costs, commands = [], {}
+    for f in sorted(projects_dir().glob("*/*.jsonl")):
+        try:
+            s, _ = cached_summary(f, pricing)
+        except OSError:
+            continue
+        if exclude and s["path"] == exclude:
+            continue
+        if (s["first_ts"] or "") < cutoff or s["project"] != project:
+            continue
+        if s["total"]["cost_usd"] is not None:
+            session_costs.append(s["total"]["cost_usd"])
+        for label, agg in s["by_label"].items():
+            c = commands.setdefault(label, {"costs": [], "ratios": []})
+            if agg["cost_usd"] is not None:
+                c["costs"].append(agg["cost_usd"])
+            r = cache_ratio(agg["usage"])
+            if r is not None:
+                c["ratios"].append(r)
+    return {
+        "sessions": len(session_costs),
+        "median_session_cost": _median(session_costs),
+        "commands": {label: {"sessions": len(c["costs"]),
+                             "median_cost": _median(c["costs"]),
+                             "median_cache_ratio": _median(c["ratios"])}
+                     for label, c in commands.items()},
+    }
+
+
+def session_insights(data, baseline, budget=None):
+    """Rule-based findings for one session's aggregate vs its project baseline."""
+    out = []
+    total_cost = data["total"]["cost_usd"]
+    solid = baseline.get("sessions", 0) >= INSIGHT_MIN_BASELINE_SESSIONS
+
+    # 1: cost outlier vs project median
+    med = baseline.get("median_session_cost")
+    if solid and med and total_cost is not None:
+        ratio = total_cost / med
+        if ratio >= INSIGHT_OUTLIER_INFO:
+            sev = "warn" if ratio >= INSIGHT_OUTLIER_WARN else "info"
+            out.append(finding("cost-outlier", sev,
+                f"This session ({fmt_cost(total_cost)}) is {ratio:.1f}× your 30-day "
+                f"median for this project ({fmt_cost(med)}).",
+                session_cost=total_cost, median=med, ratio=round(ratio, 2)))
+
+    # 2: cache hygiene regression per command
+    for label, agg in data["by_label"].items():
+        norm = baseline.get("commands", {}).get(label) or {}
+        if norm.get("sessions", 0) < INSIGHT_MIN_BASELINE_SESSIONS:
+            continue
+        base_r, cur_r = norm.get("median_cache_ratio"), cache_ratio(agg["usage"])
+        if base_r is None or cur_r is None:
+            continue
+        if base_r - cur_r >= INSIGHT_CACHE_DROP_PP:
+            out.append(finding("cache-regression", "warn",
+                f"Cache-read ratio for {label} dropped {base_r:.0%} → {cur_r:.0%} — "
+                "something is invalidating your prompt cache between turns.",
+                label=label, baseline_ratio=round(base_r, 3), ratio=round(cur_r, 3)))
+
+    # 3: ad-hoc dominance
+    other = data["by_label"].get(OTHER_LABEL)
+    if other and total_cost and other["cost_usd"]:
+        share = other["cost_usd"] / total_cost
+        if share >= INSIGHT_ADHOC_SHARE:
+            out.append(finding("adhoc-dominance", "info",
+                f"{share:.0%} of spend was ad-hoc work — wrap repeated workflows "
+                "in a command to make them trackable.", share=round(share, 3)))
+
+    # 4: unpriced models (costs understated until the overlay names them)
+    up = data["total"].get("unpriced_models") or []
+    if up:
+        out.append(finding("unpriced-models", "warn",
+            f"{', '.join(up)} unpriced — add rates to {user_pricing_path()} "
+            "(costs are currently understated).", models=up))
+
+    # 5: agent fan-out concentration
+    for label, agg in data["by_label"].items():
+        if not agg["subagents"] or not agg["cost_usd"] or not agg["agents"]:
+            continue
+        agent_cost = sum(g["cost_usd"] or 0.0 for g in agg["agents"])
+        share = agent_cost / agg["cost_usd"]
+        if share >= INSIGHT_AGENT_SHARE:
+            out.append(finding("agent-fanout", "info",
+                f"{share:.0%} of {label}'s cost was its {agg['subagents']} "
+                f"subagent(s) (top: {agg['agents'][0]['type']}).",
+                label=label, share=round(share, 3),
+                agents=agg["subagents"], top=agg["agents"][0]["type"]))
+
+    # 6: budget pace (quiet once over budget — the Stop hook owns that nudge)
+    if budget and budget > 0 and total_cost is not None:
+        pace = total_cost / budget
+        if INSIGHT_BUDGET_PACE <= pace < 1.0:
+            out.append(finding("budget-pace", "info",
+                f"Session at {fmt_cost(total_cost)} of your ${budget:.2f} budget — "
+                f"the Stop hook will nudge at ${budget:.2f}.",
+                cost=total_cost, budget=budget, share=round(pace, 3)))
+
+    order = {"warn": 0, "info": 1}
+    out.sort(key=lambda f: (order[f["severity"]], f["rule"]))
+    return out
+
+
+def window_insights(summaries, cutoff, pricing, now=None):
+    """Findings for a --since window: trend between the window's halves,
+    the top mover behind an increase, and window-wide unpriced models."""
+    from datetime import datetime, timezone
+    out = []
+
+    def _dt(iso):
+        d = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+        if d.tzinfo is None:
+            d = d.replace(tzinfo=timezone.utc)
+        return d
+
+    now_dt = _dt(now) if now else datetime.now(timezone.utc)
+    mid = (_dt(cutoff) + (now_dt - _dt(cutoff)) / 2).strftime("%Y-%m-%dT%H:%M:%SZ")
+    placed = [s for s in summaries if s["first_ts"]]  # undatable sessions can't join a half
+    first = [s for s in placed if s["first_ts"] < mid]
+    second = [s for s in placed if s["first_ts"] >= mid]
+    c1 = sum(s["total"]["cost_usd"] or 0.0 for s in first)
+    c2 = sum(s["total"]["cost_usd"] or 0.0 for s in second)
+
+    # 7: spend trend, half over half
+    if c1 > 0:
+        change = (c2 - c1) / c1
+        if abs(change) >= INSIGHT_TREND_INFO:
+            sev = "warn" if change >= INSIGHT_TREND_WARN else "info"
+            direction = "up" if change > 0 else "down"
+            out.append(finding("spend-trend", sev,
+                f"Spend is {direction} {abs(change):.0%} between the two halves of "
+                f"this window (${c1:.2f} → ${c2:.2f}).",
+                first_half=round(c1, 2), second_half=round(c2, 2),
+                change=round(change, 3)))
+
+        # 8: top mover behind an increase
+        if c2 > c1:
+            def label_costs(ss):
+                d = {}
+                for s in ss:
+                    for label, agg in s["by_label"].items():
+                        if agg["cost_usd"]:
+                            d[label] = d.get(label, 0.0) + agg["cost_usd"]
+                return d
+            l1, l2 = label_costs(first), label_costs(second)
+            movers = sorted(((l2.get(k, 0.0) - l1.get(k, 0.0), k)
+                             for k in set(l1) | set(l2)), reverse=True)
+            if movers and movers[0][0] > 0:
+                delta, label = movers[0]
+                share = delta / (c2 - c1)
+                if share >= INSIGHT_MOVER_SHARE:
+                    out.append(finding("top-mover", "info",
+                        f"{label} explains {share:.0%} of the increase "
+                        f"(+${delta:.2f}) — profile it with report --agents/--models.",
+                        label=label, delta=round(delta, 2), share=round(share, 3)))
+
+    # 9: unpriced models anywhere in the window
+    up = sorted({m for s in summaries
+                 for m in unpriced_models(s.get("by_model", {}), pricing)})
+    if up:
+        out.append(finding("unpriced-models", "warn",
+            f"{', '.join(up)} unpriced — add rates to {user_pricing_path()} "
+            "(window totals are understated).", models=up))
+
+    order = {"warn": 0, "info": 1}
+    out.sort(key=lambda f: (order[f["severity"]], f["rule"]))
+    return out
+
+
+def run_insights(transcript=None, since=None, project=None, budget=None):
+    pricing = load_pricing()
+    if since:
+        cutoff = since_cutoff(since)
+        summaries = []
+        for f in sorted(projects_dir().glob("*/*.jsonl")):
+            try:
+                s, _ = cached_summary(f, pricing)
+            except OSError:
+                continue
+            if (s["first_ts"] or "") < cutoff:
+                continue
+            if project and project not in s["project"]:
+                continue
+            summaries.append(s)
+        return {"mode": "window",
+                "findings": window_insights(summaries, cutoff, pricing),
+                "baseline": {"sessions": len(summaries), "since": since}}
+    t = resolve_transcript(transcript)
+    data = aggregate(parse_session(t), pricing)
+    baseline = compute_baseline(pricing, project=t.parent.name, exclude=str(t))
+    return {"mode": "session",
+            "findings": session_insights(data, baseline, budget=budget),
+            "baseline": baseline}
+
+
+def render_insights(result):
+    if not result["findings"]:
+        return "No notable findings."
+    return "\n".join(f"- [{f['severity']}] {f['message']}" for f in result["findings"])
 
 
 def project_slug(path_str):
@@ -819,6 +1160,11 @@ def main():
     h.add_argument("--project", default=None)
     h.add_argument("--json", action="store_true", dest="as_json")
     h.add_argument("--csv", action="store_true", dest="as_csv")
+    i = sub.add_parser("insights")
+    i.add_argument("transcript", nargs="?", default=None)
+    i.add_argument("--since", default=None)
+    i.add_argument("--project", default=None)
+    i.add_argument("--json", action="store_true", dest="as_json")
     args = ap.parse_args()
 
     if args.cmd == "hook":
@@ -833,6 +1179,18 @@ def main():
             print(render_history_csv(data), end="")
         else:
             print(render_history(data))
+        return
+    if args.cmd == "insights":
+        if args.transcript and args.since:
+            sys.exit("token-usage: pass a transcript OR --since, not both")
+        budget = None
+        try:
+            budget = float(os.environ["TOKEN_USAGE_BUDGET_USD"])
+        except (KeyError, ValueError):
+            pass
+        result = run_insights(transcript=args.transcript, since=args.since,
+                              project=args.project, budget=budget)
+        print(json.dumps(result, indent=1) if args.as_json else render_insights(result))
         return
     if getattr(args, "diff", None):
         if getattr(args, "transcript", None):

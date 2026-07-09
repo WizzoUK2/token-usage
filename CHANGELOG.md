@@ -6,6 +6,42 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-07-09
+
+### Added
+
+- **`insights` subcommand** — rule-based checks over token spend, pure
+  arithmetic (no LLM, no network). Session mode (`insights [transcript]`)
+  runs six rules: cost-outlier (warn ≥3× / info ≥2× the 30-day project
+  median session cost; needs ≥5 prior sessions), cache-regression (warn on
+  a ≥20 percentage-point cache-read-ratio drop vs a command's norm),
+  adhoc-dominance (info at ≥50% of spend), unpriced-models (warn),
+  agent-fanout (info at ≥70% of a command's cost from its subagents), and
+  budget-pace (info at 75–100% of `TOKEN_USAGE_BUDGET_USD`). Window mode
+  (`insights --since Nd|DATE [--project SUB]`) runs three rules:
+  spend-trend (warn ≥+50% / info ≥±25% half-over-half), top-mover (≥30% of
+  the increase), and unpriced-models. Prints `- [warn|info] message` lines,
+  or exactly `No notable findings.` when nothing fires. `--json` for
+  structured output.
+- **User pricing overlay** — `~/.config/token-usage/pricing.json`
+  (`XDG_CONFIG_HOME` respected) merges per-model-key over the bundled
+  pricing table, letting you price models the plugin doesn't ship rates
+  for yet without waiting on a release. Malformed overlay files warn once
+  on stderr and are otherwise ignored — never fatal.
+- **Unpriced-model footnotes** — `report`, `json`, and `history` now name
+  any models they couldn't price in a footnote, pointing at the user
+  overlay, instead of silently rendering `—` with no explanation.
+
+### Changed
+
+- **`history --by day` now splits sessions across every local day they
+  touched** (previously a session's usage was attributed only to its
+  start day). The `Calls` column for `--by day` now counts sessions
+  touching that day. Daily figures for the same underlying data shift vs
+  0.4.0 — same class of change as the 0.2.0 sticky-attribution rework.
+  Index schema bumped to v3; existing caches re-parse once on the first
+  scan after upgrading, then stay incremental.
+
 ## [0.4.0] — 2026-07-06
 
 ### Fixed
@@ -125,7 +161,8 @@ Initial release.
 - Standalone CLI: `python3 scripts/token_usage.py report|json [transcript]`.
 - Optional statusline example (`examples/statusline.sh`, requires `jq`).
 
-[Unreleased]: https://github.com/WizzoUK2/token-usage/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/WizzoUK2/token-usage/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/WizzoUK2/token-usage/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/WizzoUK2/token-usage/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/WizzoUK2/token-usage/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/WizzoUK2/token-usage/compare/v0.1.1...v0.2.0

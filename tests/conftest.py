@@ -18,6 +18,13 @@ def tu():
     return _tu
 
 
+@pytest.fixture(autouse=True)
+def _isolated_pricing_overlay(monkeypatch, tmp_path_factory):
+    # Keep the suite hermetic: never read the developer's real user overlay.
+    monkeypatch.setenv("XDG_CONFIG_HOME",
+                       str(tmp_path_factory.mktemp("xdg-isolated")))
+
+
 def usage(inp=0, out=0, cache_read=0, cache_5m=0, cache_1h=0):
     u = {"input_tokens": inp, "output_tokens": out, "cache_read_input_tokens": cache_read}
     if cache_5m or cache_1h:
