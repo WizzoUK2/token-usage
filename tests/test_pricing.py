@@ -42,15 +42,42 @@ def test_invalid_rate_entry_is_skipped(tu, monkeypatch, tmp_path, capsys):
     assert "claude-fable-5" in capsys.readouterr().err
 
 
+def test_boolean_rate_entry_is_rejected(tu, monkeypatch, tmp_path, capsys):
+    p = tmp_path / "cfg" / "token-usage" / "pricing.json"
+    p.parent.mkdir(parents=True)
+    p.write_text(json.dumps({"claude-fable-5": {"input": True, "output": 5.0}}))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+    pricing = tu.load_pricing()
+    assert pricing["claude-fable-5"] == {"input": 10.0, "output": 50.0}  # bundled intact
+    assert "claude-fable-5" in capsys.readouterr().err
+
+
+def test_non_utf8_overlay_is_skipped_with_warning(tu, monkeypatch, tmp_path, capsys):
+    p = tmp_path / "cfg" / "token-usage" / "pricing.json"
+    p.parent.mkdir(parents=True)
+    p.write_bytes(b"\xff\xfe\x00garbage")
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+    pricing = tu.load_pricing()
+    assert pricing["claude-fable-5"] == {"input": 10.0, "output": 50.0}  # bundled intact
+    assert "pricing" in capsys.readouterr().err
+
+
 def test_no_overlay_matches_bundled(tu, monkeypatch, tmp_path):
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "nowhere"))
     assert tu.load_pricing()["claude-sonnet-5"] == {"input": 3.0, "output": 15.0}
 
 
 def test_unpriced_models_helper(tu):
-    by_model = {"claude-fable-5": tu.empty_usage(), "claude-mystery-9": tu.empty_usage()}
+    by_model = {"claude-fable-5": tu.empty_usage(),
+                "claude-mystery-9": dict(tu.empty_usage(), output=100)}
     assert tu.unpriced_models(by_model, tu.DEFAULT_PRICING) == ["claude-mystery-9"]
     assert tu.unpriced_models({"claude-fable-5": tu.empty_usage()}, tu.DEFAULT_PRICING) == []
+
+
+def test_unpriced_models_skips_zero_usage_pseudo_model(tu):
+    by_model = {"claude-fable-5": dict(tu.empty_usage(), output=100),
+                "<synthetic>": tu.empty_usage()}
+    assert tu.unpriced_models(by_model, tu.DEFAULT_PRICING) == []
 
 
 def test_report_footnote_for_unpriced_model(tu, tmp_path):

@@ -197,7 +197,7 @@ def test_top_mover(tu):
 
 def test_window_unpriced(tu):
     ss = [_summary("2026-07-02T10:00:00Z", 1.0,
-                   by_model={"claude-mystery-9": {}})]
+                   by_model={"claude-mystery-9": dict(tu.empty_usage(), output=100)})]
     f = {f["rule"]: f for f in tu.window_insights(ss, CUTOFF, tu.DEFAULT_PRICING, now=NOW)}
     assert "claude-mystery-9" in f["unpriced-models"]["message"]
 
@@ -218,6 +218,7 @@ def test_window_insights_timestampless_sessions_excluded_from_halves(tu):
 
 
 import json as jsonlib
+import os
 import subprocess
 import sys
 
@@ -263,6 +264,7 @@ def test_insights_cli_json(tu, monkeypatch, tmp_path):
     ])
     env = {"TOKEN_USAGE_PROJECTS_DIR": str(tmp_path / "projects"),
            "TOKEN_USAGE_LEDGER_DIR": str(tmp_path / "cache"),
+           "XDG_CONFIG_HOME": os.environ["XDG_CONFIG_HOME"],
            "PATH": "/usr/bin:/bin"}
     out = subprocess.run([sys.executable, str(tu.__file__ if hasattr(tu, "__file__")
                           else "scripts/token_usage.py"), "insights", str(t), "--json"],

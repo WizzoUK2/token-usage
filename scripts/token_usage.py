@@ -59,8 +59,8 @@ def user_pricing_path():
 
 def _valid_rates(v):
     return (isinstance(v, dict)
-            and isinstance(v.get("input"), (int, float))
-            and isinstance(v.get("output"), (int, float)))
+            and isinstance(v.get("input"), (int, float)) and not isinstance(v.get("input"), bool)
+            and isinstance(v.get("output"), (int, float)) and not isinstance(v.get("output"), bool))
 
 
 def load_pricing():
@@ -75,7 +75,7 @@ def load_pricing():
             continue
         try:
             data = json.loads(layer.read_text())
-        except (json.JSONDecodeError, OSError):
+        except (ValueError, OSError):
             print(f"token-usage: ignoring malformed pricing file {layer}", file=sys.stderr)
             continue
         if not isinstance(data, dict):
@@ -183,7 +183,9 @@ def cache_savings_usd(by_model, pricing):
 
 def unpriced_models(by_model, pricing):
     """Model IDs with recorded usage but no resolvable rates (costs understated)."""
-    return sorted(m for m in by_model if rates_for(m, pricing) is None)
+    return sorted(m for m, b in by_model.items()
+                  if rates_for(m, pricing) is None
+                  and any(b[k] for k in ("input", "output", "cache_read", "cache_5m", "cache_1h")))
 
 
 def unpriced_footnote(models):
