@@ -989,6 +989,38 @@ def window_insights(summaries, cutoff, pricing, now=None):
     return out
 
 
+def run_insights(transcript=None, since=None, project=None, budget=None):
+    pricing = load_pricing()
+    if since:
+        cutoff = since_cutoff(since)
+        summaries = []
+        for f in sorted(projects_dir().glob("*/*.jsonl")):
+            try:
+                s, _ = cached_summary(f, pricing)
+            except OSError:
+                continue
+            if (s["first_ts"] or "") < cutoff:
+                continue
+            if project and project not in s["project"]:
+                continue
+            summaries.append(s)
+        return {"mode": "window",
+                "findings": window_insights(summaries, cutoff, pricing),
+                "baseline": {"sessions": len(summaries), "since": since}}
+    t = resolve_transcript(transcript)
+    data = aggregate(parse_session(t), pricing)
+    baseline = compute_baseline(pricing, project=t.parent.name, exclude=str(t))
+    return {"mode": "session",
+            "findings": session_insights(data, baseline, budget=budget),
+            "baseline": baseline}
+
+
+def render_insights(result):
+    if not result["findings"]:
+        return "No notable findings."
+    return "\n".join(f"- [{f['severity']}] {f['message']}" for f in result["findings"])
+
+
 def project_slug(path_str):
     # Claude Code slugs project paths by replacing every non-alphanumeric
     # character with a dash (not just / . _).
@@ -1126,6 +1158,11 @@ def main():
     h.add_argument("--project", default=None)
     h.add_argument("--json", action="store_true", dest="as_json")
     h.add_argument("--csv", action="store_true", dest="as_csv")
+    i = sub.add_parser("insights")
+    i.add_argument("transcript", nargs="?", default=None)
+    i.add_argument("--since", default=None)
+    i.add_argument("--project", default=None)
+    i.add_argument("--json", action="store_true", dest="as_json")
     args = ap.parse_args()
 
     if args.cmd == "hook":
@@ -1140,6 +1177,18 @@ def main():
             print(render_history_csv(data), end="")
         else:
             print(render_history(data))
+        return
+    if args.cmd == "insights":
+        if args.transcript and args.since:
+            sys.exit("token-usage: pass a transcript OR --since, not both")
+        budget = None
+        try:
+            budget = float(os.environ["TOKEN_USAGE_BUDGET_USD"])
+        except (KeyError, ValueError):
+            pass
+        result = run_insights(transcript=args.transcript, since=args.since,
+                              project=args.project, budget=budget)
+        print(json.dumps(result, indent=1) if args.as_json else render_insights(result))
         return
     if getattr(args, "diff", None):
         if getattr(args, "transcript", None):

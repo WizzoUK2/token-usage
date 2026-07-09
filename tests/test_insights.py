@@ -215,3 +215,66 @@ def test_window_insights_timestampless_sessions_excluded_from_halves(tu):
     f = {f["rule"]: f for f in tu.window_insights(ss, CUTOFF, tu.DEFAULT_PRICING, now=NOW)}
     assert f["spend-trend"]["severity"] == "warn"
     assert f["spend-trend"]["data"]["first_half"] == 10.0
+
+
+import json as jsonlib
+import subprocess
+import sys
+
+
+def test_render_insights_empty_and_lines(tu):
+    assert tu.render_insights({"findings": []}) == "No notable findings."
+    r = {"findings": [tu.finding("x", "warn", "watch out"),
+                      tu.finding("y", "info", "fyi")]}
+    assert tu.render_insights(r) == "- [warn] watch out\n- [info] fyi"
+
+
+def test_run_insights_session_mode(tu, monkeypatch, tmp_path):
+    monkeypatch.setenv("TOKEN_USAGE_PROJECTS_DIR", str(tmp_path / "projects"))
+    monkeypatch.setenv("TOKEN_USAGE_LEDGER_DIR", str(tmp_path / "cache"))
+    from datetime import datetime, timedelta, timezone
+    ts = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    for i in range(5):
+        _session(tmp_path, f"s{i}", 2000, ts=ts)          # ~$0.10 median
+    current = _session(tmp_path, "current", 70000, ts=ts)  # $3.50
+    r = tu.run_insights(transcript=current)
+    assert r["mode"] == "session"
+    assert "cost-outlier" in {f["rule"] for f in r["findings"]}
+    assert r["baseline"]["sessions"] == 5
+
+
+def test_run_insights_window_mode(tu, monkeypatch, tmp_path):
+    monkeypatch.setenv("TOKEN_USAGE_PROJECTS_DIR", str(tmp_path / "projects"))
+    monkeypatch.setenv("TOKEN_USAGE_LEDGER_DIR", str(tmp_path / "cache"))
+    from datetime import datetime, timedelta, timezone
+    old = (datetime.now(timezone.utc) - timedelta(days=8)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    new = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    _session(tmp_path, "old", 20000, ts=old)
+    _session(tmp_path, "new", 60000, ts=new)
+    r = tu.run_insights(since="10d")
+    assert r["mode"] == "window"
+    assert "spend-trend" in {f["rule"] for f in r["findings"]}
+
+
+def test_insights_cli_json(tu, monkeypatch, tmp_path):
+    t = write_jsonl(tmp_path / "projects" / "p" / "s.jsonl", [
+        user("2026-07-01T10:00:00Z", command="/go"),
+        assistant("2026-07-01T10:00:05Z", usage(out=100), request_id="r1"),
+    ])
+    env = {"TOKEN_USAGE_PROJECTS_DIR": str(tmp_path / "projects"),
+           "TOKEN_USAGE_LEDGER_DIR": str(tmp_path / "cache"),
+           "PATH": "/usr/bin:/bin"}
+    out = subprocess.run([sys.executable, str(tu.__file__ if hasattr(tu, "__file__")
+                          else "scripts/token_usage.py"), "insights", str(t), "--json"],
+                         capture_output=True, text=True, env=env)
+    assert out.returncode == 0
+    data = jsonlib.loads(out.stdout)
+    assert data["mode"] == "session" and isinstance(data["findings"], list)
+
+
+def test_insights_cli_rejects_transcript_plus_since(tu, tmp_path):
+    import subprocess, sys
+    out = subprocess.run([sys.executable, "scripts/token_usage.py", "insights",
+                          str(tmp_path / "x.jsonl"), "--since", "7d"],
+                         capture_output=True, text=True)
+    assert out.returncode != 0 and "--since" in out.stderr
