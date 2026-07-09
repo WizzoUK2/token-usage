@@ -930,12 +930,16 @@ def window_insights(summaries, cutoff, pricing, now=None):
     out = []
 
     def _dt(iso):
-        return datetime.fromisoformat(iso.replace("Z", "+00:00"))
+        d = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+        if d.tzinfo is None:
+            d = d.replace(tzinfo=timezone.utc)
+        return d
 
     now_dt = _dt(now) if now else datetime.now(timezone.utc)
     mid = (_dt(cutoff) + (now_dt - _dt(cutoff)) / 2).strftime("%Y-%m-%dT%H:%M:%SZ")
-    first = [s for s in summaries if (s["first_ts"] or "") < mid]
-    second = [s for s in summaries if (s["first_ts"] or "") >= mid]
+    placed = [s for s in summaries if s["first_ts"]]  # undatable sessions can't join a half
+    first = [s for s in placed if s["first_ts"] < mid]
+    second = [s for s in placed if s["first_ts"] >= mid]
     c1 = sum(s["total"]["cost_usd"] or 0.0 for s in first)
     c2 = sum(s["total"]["cost_usd"] or 0.0 for s in second)
 

@@ -200,3 +200,18 @@ def test_window_unpriced(tu):
                    by_model={"claude-mystery-9": {}})]
     f = {f["rule"]: f for f in tu.window_insights(ss, CUTOFF, tu.DEFAULT_PRICING, now=NOW)}
     assert "claude-mystery-9" in f["unpriced-models"]["message"]
+
+
+def test_window_insights_bare_date_cutoff_default_now(tu):
+    # since_cutoff passes bare YYYY-MM-DD through; must not crash with now=None
+    ss = [_summary("2026-07-02T10:00:00Z", 10.0)]
+    assert isinstance(tu.window_insights(ss, "2026-07-01", tu.DEFAULT_PRICING), list)
+
+
+def test_window_insights_timestampless_sessions_excluded_from_halves(tu):
+    ss = [_summary(None, 100.0),                       # must not inflate either half
+          _summary("2026-07-02T10:00:00Z", 10.0),
+          _summary("2026-07-08T10:00:00Z", 20.0)]      # +100% -> warn still fires
+    f = {f["rule"]: f for f in tu.window_insights(ss, CUTOFF, tu.DEFAULT_PRICING, now=NOW)}
+    assert f["spend-trend"]["severity"] == "warn"
+    assert f["spend-trend"]["data"]["first_half"] == 10.0
