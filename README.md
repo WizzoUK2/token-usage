@@ -29,6 +29,14 @@ Claude Code tells you session totals (`/cost`, OTel metrics) and tools like ccus
 - **Cache-aware cost estimates** — per-model pricing with cache reads at 0.1×, 5-minute cache writes at 1.25×, and 1-hour cache writes at 2× the input rate. Mixed-model sessions (e.g. Opus main loop + Haiku subagents) are priced per model, and reports show what prompt caching saved you. Bedrock (`us.anthropic.…`) and OpenRouter-style (`anthropic/…`) model IDs resolve too.
 - **Budget nudges** — set `TOKEN_USAGE_BUDGET_USD` and the Stop hook emits a `systemMessage` warning when the session's estimated cost crosses the threshold, and again at each further multiple (2×, 3×, …). At most one warning per multiple.
 - **Live ledger** — Stop and SubagentStop hooks keep `~/.cache/token-usage/<session-id>.json` current after every turn and every finished subagent, so reports are instant and a statusline stays fresh even during long multi-agent turns.
+- **Insights** — `insights` runs rule-based checks over the current session
+  (cost outlier vs your 30-day project median, prompt-cache regressions,
+  ad-hoc-work dominance, agent fan-out concentration, budget pace, unpriced
+  models) or a window (`insights --since 30d`: spend trend, top mover). Pure
+  arithmetic — no LLM, no network. "No notable findings." is a valid answer.
+- **User pricing overlay** — drop rates into `~/.config/token-usage/pricing.json`
+  to price new models the bundled table doesn't know yet; reports name any
+  unpriced models they encounter.
 
 ## Installation
 
@@ -93,6 +101,12 @@ python3 scripts/token_usage.py history --since 2026-06-01      # since a specifi
 python3 scripts/token_usage.py history --project myrepo        # substring filter, composes with --by
 python3 scripts/token_usage.py history --by project --json     # machine-readable
 python3 scripts/token_usage.py history --by day --csv          # raw numbers for spreadsheets
+
+# Insights
+python3 scripts/token_usage.py insights [transcript.jsonl]     # session-mode rule checks
+python3 scripts/token_usage.py insights --since 30d            # window-mode rule checks
+python3 scripts/token_usage.py insights --since 30d --project myrepo
+python3 scripts/token_usage.py insights --json [transcript.jsonl]
 ```
 
 With no argument `report` and `json` pick the most recent session for the current directory's project.
@@ -113,6 +127,22 @@ When the session's estimated cost crosses the threshold the Stop hook emits a `s
 ### Statusline (optional)
 
 `examples/statusline.sh` reads the live ledger and renders e.g. `⏶ 214k out · $33.87 · top: /code-review`. Wire it up with `/statusline` or merge it into your existing statusline script. Requires `jq`.
+
+## Insights
+
+`insights` runs a fixed set of rule-based checks — pure arithmetic against the current session (or, with `--since`, a window of history) — and prints only the rules that fired:
+
+```
+$ python3 scripts/token_usage.py insights
+- [warn] This session ($41.20) is 4.1× your 30-day median for this project ($10.05).
+- [info] 62% of spend was ad-hoc work — wrap repeated workflows in a command to make them trackable.
+```
+
+Session mode (`insights [transcript]`) checks: cost outlier vs the 30-day project median (warn ≥3×, info ≥2×; needs at least 5 prior sessions), prompt-cache regression per command (warn on a ≥20 percentage-point drop in cache-read ratio vs that command's norm), ad-hoc-work dominance (info at ≥50% of spend), unpriced models (warn), agent fan-out concentration (info at ≥70% of a command's cost coming from its subagents), and budget pace (info at 75–100% of `TOKEN_USAGE_BUDGET_USD`).
+
+Window mode (`insights --since 7d|30d|DATE [--project SUB]`) checks: spend trend between the first and second half of the window (warn ≥+50%, info ≥±25%), the top mover behind an increase (≥30% of it), and unpriced models anywhere in the window.
+
+No findings is a normal, healthy result — the tool prints `No notable findings.` rather than manufacturing something to say. `--json` returns the same findings as structured data for scripting.
 
 ## How it works
 
@@ -137,7 +167,8 @@ Costs are **API-price estimates** from the bundled `data/pricing.json` (rates as
 
 - Older transcripts without `requestId` fields are summed without dedup (may overcount).
 - `--since` filters sessions by their first timestamp; sessions whose transcripts carry no timestamps are skipped.
-- Day buckets in `history --by day` use local time.
+- Day buckets in `history --by day` use local time. As of 0.5.0, a session is split across every local day it touched (not just its start day), so daily figures for the same underlying data shift vs 0.4.0 — same class of change as the 0.2.0 sticky-attribution rework.
+- Brand-new models render `—` and are named in a footnote until you add rates to the user overlay.
 
 ## License
 
