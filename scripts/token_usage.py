@@ -181,6 +181,18 @@ def cache_savings_usd(by_model, pricing):
     return total if priced else None
 
 
+def unpriced_models(by_model, pricing):
+    """Model IDs with recorded usage but no resolvable rates (costs understated)."""
+    return sorted(m for m in by_model if rates_for(m, pricing) is None)
+
+
+def unpriced_footnote(models):
+    if not models:
+        return None
+    return (f"{len(models)} model(s) unpriced ({', '.join(models)}): "
+            f"add rates to {user_pricing_path()}")
+
+
 def merge_by_model(dest, src):
     for model, bucket in src.items():
         d = dest.setdefault(model, empty_usage())
@@ -402,6 +414,7 @@ def aggregate(segments, pricing):
             "cache_savings_usd": cache_savings_usd(total_by_model, pricing),
             "models": sorted(total_by_model),
             "by_model": total_by_model,
+            "unpriced_models": unpriced_models(total_by_model, pricing),
         },
         "segments": [
             {**{k: s[k] for k in ("label", "start_ts", "prompt")},
@@ -477,6 +490,9 @@ def render_report(data, show_agents=False, show_models=False):
     savings = t.get("cache_savings_usd")
     if savings is not None and savings >= 0.01:
         lines.append(f"Prompt caching saved ~{fmt_cost(savings)} vs. full input rates.")
+    note = unpriced_footnote(t.get("unpriced_models") or [])
+    if note:
+        lines.append(note)
     lines.append(f"Models: {models}. Cost is an API-price estimate (cache-aware); "
                  "subscription plans are not billed per token.")
     return "\n".join(lines)
@@ -614,6 +630,7 @@ def run_history(by="project", since=None, project=None):
     pricing = load_pricing()
     cutoff = since_cutoff(since)
     rows = {}
+    unpriced = set()
 
     def add_row(key, usage_dict, cost, calls):
         r = rows.setdefault(key, {"key": key, "usage": empty_usage(),
@@ -639,6 +656,7 @@ def run_history(by="project", since=None, project=None):
             continue
         if project and project not in s["project"]:
             continue
+        unpriced.update(unpriced_models(s.get("by_model", {}), pricing))
         if by == "project":
             add_row(s["project"], s["total"]["usage"], s["total"]["cost_usd"], 1)
         elif by == "day":
@@ -652,7 +670,7 @@ def run_history(by="project", since=None, project=None):
                 add_row(label, agg["usage"], agg["cost_usd"], agg["invocations"])
 
     ordered = sorted(rows.values(), key=lambda r: (-(r["cost_usd"] or 0), r["key"]))
-    return {"by": by, "since": since, "project": project, "rows": ordered}
+    return {"by": by, "since": since, "project": project, "rows": ordered, "unpriced_models": sorted(unpriced)}
 
 
 def burn_rate_line(total_cost, since):
@@ -708,6 +726,9 @@ def render_history(data):
     burn = burn_rate_line(total_cost, data.get("since"))
     if burn:
         lines += ["", burn]
+    note = unpriced_footnote(data.get("unpriced_models") or [])
+    if note:
+        lines += ["", note]
     return "\n".join(lines)
 
 

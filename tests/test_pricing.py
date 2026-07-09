@@ -45,3 +45,47 @@ def test_invalid_rate_entry_is_skipped(tu, monkeypatch, tmp_path, capsys):
 def test_no_overlay_matches_bundled(tu, monkeypatch, tmp_path):
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "nowhere"))
     assert tu.load_pricing()["claude-sonnet-5"] == {"input": 3.0, "output": 15.0}
+
+
+def test_unpriced_models_helper(tu):
+    by_model = {"claude-fable-5": tu.empty_usage(), "claude-mystery-9": tu.empty_usage()}
+    assert tu.unpriced_models(by_model, tu.DEFAULT_PRICING) == ["claude-mystery-9"]
+    assert tu.unpriced_models({"claude-fable-5": tu.empty_usage()}, tu.DEFAULT_PRICING) == []
+
+
+def test_report_footnote_for_unpriced_model(tu, tmp_path):
+    from conftest import usage, user, assistant, write_jsonl
+    t = write_jsonl(tmp_path / "s.jsonl", [
+        user("2026-07-01T10:00:00Z", command="/go"),
+        assistant("2026-07-01T10:00:05Z", usage(inp=10, out=20),
+                  model="claude-mystery-9", request_id="r1"),
+    ])
+    data = tu.aggregate(tu.parse_session(t), tu.load_pricing())
+    assert data["total"]["unpriced_models"] == ["claude-mystery-9"]
+    out = tu.render_report(data)
+    assert "unpriced" in out and "claude-mystery-9" in out and "pricing.json" in out
+
+
+def test_no_footnote_when_all_priced(tu, tmp_path):
+    from conftest import usage, user, assistant, write_jsonl
+    t = write_jsonl(tmp_path / "s.jsonl", [
+        user("2026-07-01T10:00:00Z", command="/go"),
+        assistant("2026-07-01T10:00:05Z", usage(inp=10, out=20), request_id="r1"),
+    ])
+    data = tu.aggregate(tu.parse_session(t), tu.load_pricing())
+    assert data["total"]["unpriced_models"] == []
+    assert "unpriced" not in tu.render_report(data)
+
+
+def test_history_collects_unpriced(tu, monkeypatch, tmp_path):
+    from conftest import usage, user, assistant, write_jsonl
+    monkeypatch.setenv("TOKEN_USAGE_PROJECTS_DIR", str(tmp_path / "projects"))
+    monkeypatch.setenv("TOKEN_USAGE_LEDGER_DIR", str(tmp_path / "cache"))
+    write_jsonl(tmp_path / "projects" / "proj-a" / "s1.jsonl", [
+        user("2026-07-01T10:00:00Z"),
+        assistant("2026-07-01T10:00:05Z", usage(inp=10, out=20),
+                  model="claude-mystery-9", request_id="r1"),
+    ])
+    data = tu.run_history(by="project")
+    assert data["unpriced_models"] == ["claude-mystery-9"]
+    assert "unpriced" in tu.render_history(data)
