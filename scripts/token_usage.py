@@ -849,6 +849,51 @@ def compute_baseline(pricing, project, days=30, exclude=None):
     }
 
 
+def session_insights(data, baseline, budget=None):
+    """Rule-based findings for one session's aggregate vs its project baseline."""
+    out = []
+    total_cost = data["total"]["cost_usd"]
+    solid = baseline.get("sessions", 0) >= INSIGHT_MIN_BASELINE_SESSIONS
+
+    # 1: cost outlier vs project median
+    med = baseline.get("median_session_cost")
+    if solid and med and total_cost is not None:
+        ratio = total_cost / med
+        if ratio >= INSIGHT_OUTLIER_INFO:
+            sev = "warn" if ratio >= INSIGHT_OUTLIER_WARN else "info"
+            out.append(finding("cost-outlier", sev,
+                f"This session ({fmt_cost(total_cost)}) is {ratio:.1f}× your 30-day "
+                f"median for this project ({fmt_cost(med)}).",
+                session_cost=total_cost, median=med, ratio=round(ratio, 2)))
+
+    # 2: cache hygiene regression per command
+    for label, agg in data["by_label"].items():
+        norm = baseline.get("commands", {}).get(label) or {}
+        if norm.get("sessions", 0) < INSIGHT_MIN_BASELINE_SESSIONS:
+            continue
+        base_r, cur_r = norm.get("median_cache_ratio"), cache_ratio(agg["usage"])
+        if base_r is None or cur_r is None:
+            continue
+        if base_r - cur_r >= INSIGHT_CACHE_DROP_PP:
+            out.append(finding("cache-regression", "warn",
+                f"Cache-read ratio for {label} dropped {base_r:.0%} → {cur_r:.0%} — "
+                "something is invalidating your prompt cache between turns.",
+                label=label, baseline_ratio=round(base_r, 3), ratio=round(cur_r, 3)))
+
+    # 3: ad-hoc dominance
+    other = data["by_label"].get(OTHER_LABEL)
+    if other and total_cost and other["cost_usd"]:
+        share = other["cost_usd"] / total_cost
+        if share >= INSIGHT_ADHOC_SHARE:
+            out.append(finding("adhoc-dominance", "info",
+                f"{share:.0%} of spend was ad-hoc work — wrap repeated workflows "
+                "in a command to make them trackable.", share=round(share, 3)))
+
+    order = {"warn": 0, "info": 1}
+    out.sort(key=lambda f: (order[f["severity"]], f["rule"]))
+    return out
+
+
 def project_slug(path_str):
     # Claude Code slugs project paths by replacing every non-alphanumeric
     # character with a dash (not just / . _).
