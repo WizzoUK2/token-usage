@@ -156,3 +156,47 @@ def test_budget_pace_rule(tu, tmp_path):
     assert "budget-pace" not in {f["rule"] for f in tu.session_insights(a, THIN, budget=5.0)}
     # no budget set
     assert "budget-pace" not in {f["rule"] for f in tu.session_insights(a, THIN)}
+
+
+def _summary(ts, cost, label_costs=None, by_model=None):
+    return {"first_ts": ts, "total": {"cost_usd": cost, "usage": {}},
+            "by_label": {k: {"cost_usd": v, "usage": {}, "invocations": 1}
+                         for k, v in (label_costs or {}).items()},
+            "by_model": by_model or {}}
+
+
+CUTOFF, NOW = "2026-07-01T00:00:00Z", "2026-07-11T00:00:00Z"  # midpoint 07-06
+
+
+def test_spend_trend_warn_and_direction(tu):
+    ss = [_summary("2026-07-02T10:00:00Z", 10.0),
+          _summary("2026-07-08T10:00:00Z", 20.0)]
+    f = {f["rule"]: f for f in tu.window_insights(ss, CUTOFF, tu.DEFAULT_PRICING, now=NOW)}
+    assert f["spend-trend"]["severity"] == "warn" and "up" in f["spend-trend"]["message"]
+    down = [_summary("2026-07-02T10:00:00Z", 20.0),
+            _summary("2026-07-08T10:00:00Z", 14.0)]   # -30% -> info
+    f = {f["rule"]: f for f in tu.window_insights(down, CUTOFF, tu.DEFAULT_PRICING, now=NOW)}
+    assert f["spend-trend"]["severity"] == "info" and "down" in f["spend-trend"]["message"]
+
+
+def test_spend_trend_quiet_when_flat_or_empty_first_half(tu):
+    flat = [_summary("2026-07-02T10:00:00Z", 10.0),
+            _summary("2026-07-08T10:00:00Z", 11.0)]
+    assert "spend-trend" not in {f["rule"] for f in
+                                 tu.window_insights(flat, CUTOFF, tu.DEFAULT_PRICING, now=NOW)}
+    empty = [_summary("2026-07-08T10:00:00Z", 11.0)]
+    assert tu.window_insights(empty, CUTOFF, tu.DEFAULT_PRICING, now=NOW) == []
+
+
+def test_top_mover(tu):
+    ss = [_summary("2026-07-02T10:00:00Z", 10.0, {"/review": 1.0}),
+          _summary("2026-07-08T10:00:00Z", 22.0, {"/review": 11.0})]
+    f = {f["rule"]: f for f in tu.window_insights(ss, CUTOFF, tu.DEFAULT_PRICING, now=NOW)}
+    assert "/review" in f["top-mover"]["message"]
+
+
+def test_window_unpriced(tu):
+    ss = [_summary("2026-07-02T10:00:00Z", 1.0,
+                   by_model={"claude-mystery-9": {}})]
+    f = {f["rule"]: f for f in tu.window_insights(ss, CUTOFF, tu.DEFAULT_PRICING, now=NOW)}
+    assert "claude-mystery-9" in f["unpriced-models"]["message"]

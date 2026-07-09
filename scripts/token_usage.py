@@ -923,6 +923,68 @@ def session_insights(data, baseline, budget=None):
     return out
 
 
+def window_insights(summaries, cutoff, pricing, now=None):
+    """Findings for a --since window: trend between the window's halves,
+    the top mover behind an increase, and window-wide unpriced models."""
+    from datetime import datetime, timezone
+    out = []
+
+    def _dt(iso):
+        return datetime.fromisoformat(iso.replace("Z", "+00:00"))
+
+    now_dt = _dt(now) if now else datetime.now(timezone.utc)
+    mid = (_dt(cutoff) + (now_dt - _dt(cutoff)) / 2).strftime("%Y-%m-%dT%H:%M:%SZ")
+    first = [s for s in summaries if (s["first_ts"] or "") < mid]
+    second = [s for s in summaries if (s["first_ts"] or "") >= mid]
+    c1 = sum(s["total"]["cost_usd"] or 0.0 for s in first)
+    c2 = sum(s["total"]["cost_usd"] or 0.0 for s in second)
+
+    # 7: spend trend, half over half
+    if c1 > 0:
+        change = (c2 - c1) / c1
+        if abs(change) >= INSIGHT_TREND_INFO:
+            sev = "warn" if change >= INSIGHT_TREND_WARN else "info"
+            direction = "up" if change > 0 else "down"
+            out.append(finding("spend-trend", sev,
+                f"Spend is {direction} {abs(change):.0%} between the two halves of "
+                f"this window (${c1:.2f} → ${c2:.2f}).",
+                first_half=round(c1, 2), second_half=round(c2, 2),
+                change=round(change, 3)))
+
+        # 8: top mover behind an increase
+        if c2 > c1:
+            def label_costs(ss):
+                d = {}
+                for s in ss:
+                    for label, agg in s["by_label"].items():
+                        if agg["cost_usd"]:
+                            d[label] = d.get(label, 0.0) + agg["cost_usd"]
+                return d
+            l1, l2 = label_costs(first), label_costs(second)
+            movers = sorted(((l2.get(k, 0.0) - l1.get(k, 0.0), k)
+                             for k in set(l1) | set(l2)), reverse=True)
+            if movers and movers[0][0] > 0:
+                delta, label = movers[0]
+                share = delta / (c2 - c1)
+                if share >= INSIGHT_MOVER_SHARE:
+                    out.append(finding("top-mover", "info",
+                        f"{label} explains {share:.0%} of the increase "
+                        f"(+${delta:.2f}) — profile it with report --agents/--models.",
+                        label=label, delta=round(delta, 2), share=round(share, 3)))
+
+    # 9: unpriced models anywhere in the window
+    up = sorted({m for s in summaries
+                 for m in unpriced_models(s.get("by_model", {}), pricing)})
+    if up:
+        out.append(finding("unpriced-models", "warn",
+            f"{', '.join(up)} unpriced — add rates to {user_pricing_path()} "
+            "(window totals are understated).", models=up))
+
+    order = {"warn": 0, "info": 1}
+    out.sort(key=lambda f: (order[f["severity"]], f["rule"]))
+    return out
+
+
 def project_slug(path_str):
     # Claude Code slugs project paths by replacing every non-alphanumeric
     # character with a dash (not just / . _).
