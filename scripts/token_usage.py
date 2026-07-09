@@ -51,14 +51,43 @@ CACHE_5M_MULT = 1.25
 CACHE_1H_MULT = 2.0
 
 
+def user_pricing_path():
+    """User pricing overlay location ($XDG_CONFIG_HOME/token-usage/pricing.json)."""
+    base = os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
+    return Path(base) / "token-usage" / "pricing.json"
+
+
+def _valid_rates(v):
+    return (isinstance(v, dict)
+            and isinstance(v.get("input"), (int, float))
+            and isinstance(v.get("output"), (int, float)))
+
+
 def load_pricing():
+    """Three-layer per-model-key merge: defaults <- bundled <- user overlay.
+
+    A malformed layer (or a single invalid entry) is warned about once on
+    stderr and skipped — never fatal, because the Stop hook calls this."""
+    pricing = dict(DEFAULT_PRICING)
     bundled = Path(__file__).resolve().parent.parent / "data" / "pricing.json"
-    if bundled.exists():
+    for layer in (bundled, user_pricing_path()):
+        if not layer.exists():
+            continue
         try:
-            return json.loads(bundled.read_text())
+            data = json.loads(layer.read_text())
         except (json.JSONDecodeError, OSError):
-            pass
-    return DEFAULT_PRICING
+            print(f"token-usage: ignoring malformed pricing file {layer}", file=sys.stderr)
+            continue
+        if not isinstance(data, dict):
+            print(f"token-usage: ignoring malformed pricing file {layer}", file=sys.stderr)
+            continue
+        for key, rates in data.items():
+            if _valid_rates(rates):
+                pricing[key] = rates
+            else:
+                print(f"token-usage: ignoring invalid rates for {key} in {layer}",
+                      file=sys.stderr)
+    return pricing
 
 
 # Bedrock-style IDs prepend an optional region and "anthropic." (us.anthropic.claude-...).
