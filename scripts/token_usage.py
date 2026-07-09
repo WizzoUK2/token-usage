@@ -268,6 +268,42 @@ def sum_transcript(path):
     return by_model, first_ts
 
 
+def sum_by_day(path):
+    """Per-local-day usage for one transcript file, deduped by requestId.
+
+    Returns {local_day: by_model}. A request keeps its first-seen timestamp's
+    day; requests with no timestamp fall into the file's first known day
+    ('unknown' if the file has no timestamps at all)."""
+    first_ts, by_day, pending = None, {}, {}  # pending: req -> (day|None, model, flat)
+    for entry in iter_jsonl(path):
+        ts = entry.get("timestamp")
+        if first_ts is None and ts:
+            first_ts = ts
+        if entry.get("type") != "assistant":
+            continue
+        msg = entry.get("message") or {}
+        usage = msg.get("usage")
+        if not usage:
+            continue
+        flat = normalize_usage(usage)
+        req = entry.get("requestId")
+        day = _local_day(ts) if ts else None   # None = resolve to first day at the end
+        model = msg.get("model") or "unknown"
+        if req and req in pending:
+            max_flat(pending[req][2], flat)
+        elif req:
+            pending[req] = (day, model, flat)
+        else:
+            add_flat(by_day.setdefault(day, {}).setdefault(model, empty_usage()), flat)
+    fallback = _local_day(first_ts)
+    out = {}
+    for day, models in by_day.items():
+        merge_by_model(out.setdefault(day or fallback, {}), models)
+    for day, model, flat in pending.values():
+        add_flat(out.setdefault(day or fallback, {}).setdefault(model, empty_usage()), flat)
+    return out
+
+
 def parse_session(transcript_path):
     transcript_path = Path(transcript_path)
     segments = []  # chronological: {label, start_ts, usage, models, prompt}
@@ -540,7 +576,7 @@ def render_diff(d):
     return "\n".join(lines)
 
 
-INDEX_VERSION = 2
+INDEX_VERSION = 3
 
 
 def projects_dir():
@@ -559,6 +595,12 @@ def summarize_transcript(path, pricing, st=None):
     st = st or path.stat()
     segs = parse_session(path)
     data = aggregate(segs, pricing)
+    day_models = sum_by_day(path)
+    subagents_dir = path.parent / path.stem / "subagents"
+    if subagents_dir.is_dir():
+        for agent_file in sorted(subagents_dir.glob("agent-*.jsonl")):
+            for day, models in sum_by_day(agent_file).items():
+                merge_by_model(day_models.setdefault(day, {}), models)
     return {
         "version": INDEX_VERSION, "path": str(path),
         "mtime_ns": st.st_mtime_ns, "size": st.st_size,
@@ -570,6 +612,9 @@ def summarize_transcript(path, pricing, st=None):
         "by_model": data["total"]["by_model"],
         "total": {"usage": data["total"]["usage"],
                   "cost_usd": data["total"]["cost_usd"]},
+        "by_day": {day: {"usage": sum_buckets(models),
+                         "cost_usd": cost_usd(models, pricing)}
+                   for day, models in day_models.items()},
     }
 
 

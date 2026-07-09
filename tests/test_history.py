@@ -168,3 +168,80 @@ def test_history_recovers_from_corrupt_cache_entry(tu, tmp_path, monkeypatch):
     rows = tu.run_history(by="project")
     assert {r["key"] for r in rows["rows"]} == {"-Users-x-repo-one", "-Users-x-repo-two"}
     assert json.loads(victim.read_text())["version"] == tu.INDEX_VERSION  # healed
+
+
+def test_sum_by_day_splits_midnight_and_dedups(tu, tmp_path):
+    t = write_jsonl(tmp_path / "s.jsonl", [
+        user("2026-07-01T10:00:00Z"),
+        assistant("2026-07-01T10:00:05Z", usage(inp=10, out=100), request_id="r1"),
+        # streamed duplicate of r1 — must not double count
+        assistant("2026-07-01T10:00:06Z", usage(inp=10, out=100), request_id="r1"),
+        # 12:00Z next day: stays a different LOCAL day in any timezone CI runs in
+        assistant("2026-07-02T12:00:00Z", usage(inp=10, out=300), request_id="r2"),
+    ])
+    by_day = tu.sum_by_day(t)
+    days = sorted(by_day)
+    assert len(days) == 2
+    assert tu.sum_buckets(by_day[days[0]])["output"] == 100
+    assert tu.sum_buckets(by_day[days[1]])["output"] == 300
+
+
+def test_sum_by_day_timestampless_requests_fall_to_first_day(tu, tmp_path):
+    entries = [
+        user("2026-07-01T10:00:00Z"),
+        assistant("2026-07-01T10:00:05Z", usage(out=100), request_id="r1"),
+        assistant(None, usage(out=50), request_id="r2"),
+    ]
+    entries[2].pop("timestamp")
+    t = write_jsonl(tmp_path / "s.jsonl", entries)
+    by_day = tu.sum_by_day(t)
+    assert len(by_day) == 1
+    assert tu.sum_buckets(next(iter(by_day.values())))["output"] == 150
+
+
+def test_summarize_transcript_has_by_day_and_version_3(tu, monkeypatch, tmp_path):
+    monkeypatch.setenv("TOKEN_USAGE_LEDGER_DIR", str(tmp_path / "cache"))
+    t = write_jsonl(tmp_path / "projects" / "p" / "s.jsonl", [
+        user("2026-07-01T10:00:00Z"),
+        assistant("2026-07-01T10:00:05Z", usage(inp=10, out=100), request_id="r1"),
+        assistant("2026-07-02T01:00:00Z", usage(inp=10, out=300), request_id="r2"),
+    ])
+    s = tu.summarize_transcript(t, tu.load_pricing())
+    assert s["version"] == 3
+    assert len(s["by_day"]) == 2
+    assert sum(d["usage"]["output"] for d in s["by_day"].values()) == 400
+    assert all(d["cost_usd"] is not None for d in s["by_day"].values())
+
+
+def test_summarize_by_day_includes_subagents(tu, monkeypatch, tmp_path):
+    monkeypatch.setenv("TOKEN_USAGE_LEDGER_DIR", str(tmp_path / "cache"))
+    t = write_jsonl(tmp_path / "projects" / "p" / "s.jsonl", [
+        user("2026-07-01T10:00:00Z", command="/go"),
+        assistant("2026-07-01T10:00:05Z", usage(out=100), request_id="r1"),
+    ])
+    write_jsonl(tmp_path / "projects" / "p" / "s" / "subagents" / "agent-1.jsonl", [
+        assistant("2026-07-01T10:01:00Z", usage(out=40), request_id="a1"),
+    ])
+    s = tu.summarize_transcript(t, tu.load_pricing())
+    assert sum(d["usage"]["output"] for d in s["by_day"].values()) == 140
+
+
+def test_v2_index_entry_reparses_once(tu, monkeypatch, tmp_path):
+    monkeypatch.setenv("TOKEN_USAGE_LEDGER_DIR", str(tmp_path / "cache"))
+    t = write_jsonl(tmp_path / "projects" / "p" / "s.jsonl", [
+        user("2026-07-01T10:00:00Z"),
+        assistant("2026-07-01T10:00:05Z", usage(out=100), request_id="r1"),
+    ])
+    s1, hit1 = tu.cached_summary(t, tu.load_pricing())
+    assert not hit1 and s1["version"] == 3
+    # forge a stale v2 entry: same mtime/size but version 2 and no by_day
+    import hashlib, json as j
+    cache_file = tu.index_dir() / (hashlib.sha1(str(t).encode()).hexdigest() + ".json")
+    stale = j.loads(cache_file.read_text())
+    stale["version"] = 2
+    stale.pop("by_day")
+    cache_file.write_text(j.dumps(stale))
+    s2, hit2 = tu.cached_summary(t, tu.load_pricing())
+    assert not hit2 and s2["version"] == 3 and "by_day" in s2   # re-parsed
+    s3, hit3 = tu.cached_summary(t, tu.load_pricing())
+    assert hit3                                                  # now cached
