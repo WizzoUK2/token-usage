@@ -161,7 +161,7 @@ The `history` subcommand builds an incremental index under `~/.cache/token-usage
 
 ## Cost disclaimer
 
-Costs are **API-price estimates** from the bundled `data/pricing.json` (rates as of July 2026). Subscription plans (Pro/Max) are not billed per token — treat the figure as "what this would cost at API prices". Update `data/pricing.json` if rates change; models not in the table show `—`. Sonnet 5 is priced at its $3/$15 sticker rate — the introductory $2/$10 promo (through 2026-08-31) is not modelled.
+Costs are **API-price estimates** from the bundled `data/pricing.json` (rates as of July 2026). Subscription plans (Pro/Max) are not billed per token — treat the figure as "what this would cost at API prices". Update `data/pricing.json` if rates change; models not in the table show `—`. Rates can be added to the user pricing overlay at `~/.config/token-usage/pricing.json`, and unpriced models are named in a report footnote either way. Sonnet 5 is priced at its $3/$15 sticker rate — the introductory $2/$10 promo (through 2026-08-31) is not modelled.
 
 ## Limitations
 
