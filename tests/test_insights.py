@@ -121,3 +121,38 @@ def test_findings_sorted_warn_first(tu, tmp_path):
     found = tu.session_insights(big, BASE)
     sevs = [f["severity"] for f in found]
     assert sevs == sorted(sevs, key=lambda s: {"warn": 0, "info": 1}[s])
+
+
+def test_unpriced_models_rule(tu, tmp_path):
+    a = _agg(tu, [user("2026-07-01T10:00:00Z", command="/go"),
+                  assistant("2026-07-01T10:00:05Z", usage(out=100),
+                            model="claude-mystery-9", request_id="r1")],
+             tmp_path, "unpriced")
+    f = {f["rule"]: f for f in tu.session_insights(a, THIN)}["unpriced-models"]
+    assert f["severity"] == "warn"
+    assert "claude-mystery-9" in f["message"] and "pricing.json" in f["message"]
+
+
+def test_agent_fanout_rule(tu, tmp_path):
+    t = write_jsonl(tmp_path / "fan.jsonl", [
+        user("2026-07-01T10:00:00Z", command="/go"),
+        assistant("2026-07-01T10:00:05Z", usage(out=1000), request_id="r1"),
+    ])
+    write_jsonl(tmp_path / "fan" / "subagents" / "agent-1.jsonl", [
+        assistant("2026-07-01T10:01:00Z", usage(out=50000), request_id="a1"),
+    ])
+    data = tu.aggregate(tu.parse_session(t), tu.load_pricing())
+    f = {f["rule"]: f for f in tu.session_insights(data, THIN)}["agent-fanout"]
+    assert f["severity"] == "info" and "/go" in f["message"] and "subagent" in f["message"]
+
+
+def test_budget_pace_rule(tu, tmp_path):
+    a = _agg(tu, [user("2026-07-01T10:00:00Z", command="/go"),
+                  assistant("2026-07-01T10:00:05Z", usage(out=160000), request_id="r1")],
+             tmp_path, "pace")   # $8.00 on fable-5
+    f = {f["rule"]: f for f in tu.session_insights(a, THIN, budget=10.0)}["budget-pace"]
+    assert "$8.00" in f["message"] and "$10.00" in f["message"]
+    # over budget: the hook already nudged — insights stays quiet
+    assert "budget-pace" not in {f["rule"] for f in tu.session_insights(a, THIN, budget=5.0)}
+    # no budget set
+    assert "budget-pace" not in {f["rule"] for f in tu.session_insights(a, THIN)}

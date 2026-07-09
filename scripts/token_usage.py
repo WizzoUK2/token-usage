@@ -889,6 +889,35 @@ def session_insights(data, baseline, budget=None):
                 f"{share:.0%} of spend was ad-hoc work — wrap repeated workflows "
                 "in a command to make them trackable.", share=round(share, 3)))
 
+    # 4: unpriced models (costs understated until the overlay names them)
+    up = data["total"].get("unpriced_models") or []
+    if up:
+        out.append(finding("unpriced-models", "warn",
+            f"{', '.join(up)} unpriced — add rates to {user_pricing_path()} "
+            "(costs are currently understated).", models=up))
+
+    # 5: agent fan-out concentration
+    for label, agg in data["by_label"].items():
+        if not agg["subagents"] or not agg["cost_usd"] or not agg["agents"]:
+            continue
+        agent_cost = sum(g["cost_usd"] or 0.0 for g in agg["agents"])
+        share = agent_cost / agg["cost_usd"]
+        if share >= INSIGHT_AGENT_SHARE:
+            out.append(finding("agent-fanout", "info",
+                f"{share:.0%} of {label}'s cost was its {agg['subagents']} "
+                f"subagent(s) (top: {agg['agents'][0]['type']}).",
+                label=label, share=round(share, 3),
+                agents=agg["subagents"], top=agg["agents"][0]["type"]))
+
+    # 6: budget pace (quiet once over budget — the Stop hook owns that nudge)
+    if budget and budget > 0 and total_cost is not None:
+        pace = total_cost / budget
+        if INSIGHT_BUDGET_PACE <= pace < 1.0:
+            out.append(finding("budget-pace", "info",
+                f"Session at {fmt_cost(total_cost)} of your ${budget:.2f} budget — "
+                f"the Stop hook will nudge at ${budget:.2f}.",
+                cost=total_cost, budget=budget, share=round(pace, 3)))
+
     order = {"warn": 0, "info": 1}
     out.sort(key=lambda f: (order[f["severity"]], f["rule"]))
     return out
