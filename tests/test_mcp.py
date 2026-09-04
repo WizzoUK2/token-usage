@@ -206,6 +206,19 @@ def test_session_cost_by_session_id_and_markdown(mcp, tmp_path, monkeypatch):
     assert not err
     assert text.startswith("| Activity |")
     assert "`/commit`" in text and "↳ claude-fable-5" in text
+    # Markdown must name the transcript analysed (render_report reads
+    # transcript_path, not the tool's own "transcript" key).
+    assert f"Session: `{s2.parent.name}/{s2.name}`" in text
+
+
+def test_session_cost_rejects_blank_selectors(mcp, tmp_path, monkeypatch):
+    proj, s1, s2 = seed(tmp_path, monkeypatch)
+    text, err = call(mcp, "session_cost", transcript="")
+    assert err and "blank" in text
+    text, err = call(mcp, "session_cost", session_id="")
+    assert err and "blank" in text
+    text, err = call(mcp, "session_cost", session_id="   ")
+    assert err and "blank" in text
 
 
 def test_session_cost_uses_project_dir_env_then_newest_anywhere(mcp, tmp_path, monkeypatch):
@@ -233,3 +246,11 @@ def test_diff_by_path_and_id(mcp, tmp_path, monkeypatch):
     assert not err and md.startswith("| Activity | A cost | B cost |")
     text, err = call(mcp, "diff", old="aaa-111", new="missing-1")
     assert err and "missing-1" in text
+
+
+def test_diff_rejects_blank_selectors(mcp, tmp_path, monkeypatch):
+    proj, s1, s2 = seed(tmp_path, monkeypatch)
+    text, err = call(mcp, "diff", old="", new="bbb-222")
+    assert err and "blank" in text
+    text, err = call(mcp, "diff", old=str(s1), new="   ")
+    assert err and "blank" in text

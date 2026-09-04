@@ -211,6 +211,10 @@ def serve(stdin=None, stdout=None):
 
 def pick_transcript(path=None, session_id=None):
     """Resolve a session per the spec order, or raise ToolError saying what was tried."""
+    if path is not None and not path.strip():
+        raise ToolError("transcript must not be blank")
+    if session_id is not None and not session_id.strip():
+        raise ToolError("session_id must not be blank")
     project_dir = os.environ.get("TOKEN_USAGE_PROJECT_DIR") or None
     t = tu.locate_transcript(path, session_id=session_id, project_dir=project_dir)
     if t:
@@ -230,7 +234,7 @@ def finish(data, render, fmt):
 def tool_session_cost(args):
     t = pick_transcript(args.get("transcript"), args.get("session_id"))
     data = tu.aggregate(tu.parse_session(t), tu.load_pricing())
-    data["transcript"] = str(t)
+    data["transcript"] = data["transcript_path"] = str(t)
     return finish(data,
                   lambda d: tu.render_report(d, show_agents=bool(args.get("agents")),
                                              show_models=bool(args.get("models"))),
@@ -239,6 +243,8 @@ def tool_session_cost(args):
 
 def _path_or_id(value):
     """diff accepts either form per side: an existing path wins, else a session id."""
+    if not value.strip():
+        raise ToolError("old/new must not be blank")
     p = Path(value)
     return pick_transcript(path=value) if p.is_file() else pick_transcript(session_id=value)
 
