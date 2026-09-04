@@ -1,7 +1,22 @@
 """Transcript resolution order used by the CLI and the MCP server."""
 import os
 
+import pytest
+
 from conftest import assistant, usage, user, write_jsonl
+
+
+@pytest.fixture(autouse=True)
+def _no_cowork_mounts(monkeypatch, tu):
+    # Every test in this module ends up calling find_latest_transcript()
+    # (directly, via locate_transcript(), or via resolve_transcript()), and
+    # that function's Cowork fallback reads whatever this machine's real
+    # HOME/mnt/.claude/projects or /sessions/*/mnt/.claude/projects happen to
+    # contain. Neutralise that lookup for the whole module, unconditionally,
+    # rather than per-test via seed() — a test that never calls seed() (e.g.
+    # one exercising resolve_transcript() directly) must not see real Cowork
+    # sandbox mounts either.
+    monkeypatch.setattr(tu, "_cowork_roots", lambda: [])
 
 
 def seed(tmp_path, monkeypatch, tu):
@@ -19,11 +34,9 @@ def seed(tmp_path, monkeypatch, tu):
     os.utime(b, (1_700_000_100, 1_700_000_100))
     monkeypatch.setenv("TOKEN_USAGE_PROJECTS_DIR", str(proj))
     monkeypatch.delenv("TOKEN_USAGE_TRANSCRIPT", raising=False)
-    # This suite must not see whatever Cowork sandbox mounts happen to exist
-    # on the machine it runs on (real HOME/mnt/.claude/projects, or
-    # /sessions/*/mnt/.claude/projects) — neutralise that lookup entirely so
-    # results depend only on the seeded `proj` tree above.
-    monkeypatch.setattr(tu, "_cowork_roots", lambda: [])
+    # Cowork mount neutralisation is handled module-wide by the autouse
+    # _no_cowork_mounts fixture above, so results here depend only on the
+    # seeded `proj` tree.
     return proj, a, b
 
 
@@ -91,7 +104,6 @@ def test_env_transcript_missing_file_returns_none(tu, tmp_path, monkeypatch):
 
 
 def test_resolve_transcript_exits_when_nothing_found(tu, tmp_path, monkeypatch):
-    import pytest
     monkeypatch.setenv("TOKEN_USAGE_PROJECTS_DIR", str(tmp_path / "empty"))
     monkeypatch.delenv("TOKEN_USAGE_TRANSCRIPT", raising=False)
     monkeypatch.chdir(tmp_path)
