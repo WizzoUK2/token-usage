@@ -186,8 +186,9 @@ Used by `session_cost`, `insights` (session mode) and `diff`. Order:
    several matches pick the newest by mtime;
 3. `TOKEN_USAGE_PROJECT_DIR` set — newest `.jsonl` under
    `<projects>/<slug(project_dir)>/`;
-4. newest `.jsonl` under any project (covers Claude desktop, where no
-   project dir exists), then the Cowork mount roots.
+4. the Cowork mount roots (they hold exactly the live session), then the
+   newest `.jsonl` under any project (Claude desktop, where no project dir
+   exists).
 
 The analyser gains `locate_transcript(arg=None, session_id=None,
 project_dir=None)` returning a `Path` or `None`; the CLI's

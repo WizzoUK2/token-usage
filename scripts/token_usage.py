@@ -1054,38 +1054,59 @@ def project_slug(path_str):
     return re.sub(r"[^A-Za-z0-9]", "-", path_str)
 
 
-def find_latest_transcript():
-    # 1) Claude Code: ~/.claude/projects/<cwd-slug>/*.jsonl
-    project_dir = Path.home() / ".claude" / "projects" / project_slug(str(Path.cwd()))
-    if project_dir.is_dir():
-        files = sorted(project_dir.glob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
-        if files:
-            return files[0]
+def _newest(paths):
+    paths = list(paths)
+    return max(paths, key=lambda p: p.stat().st_mtime) if paths else None
+
+
+def find_latest_transcript(project_dir=None):
+    """Newest transcript for a project (default: cwd), or None.
+
+    Order: the project's own directory under projects_dir(); the Cowork sandbox
+    mounts (which hold exactly the live session); then the newest transcript in
+    any project — the Claude desktop case, where there is no project dir."""
+    root = projects_dir()
+    # 1) Claude Code: <projects>/<slug>/*.jsonl
+    slug_dir = root / project_slug(str(project_dir or Path.cwd()))
+    if slug_dir.is_dir():
+        f = _newest(slug_dir.glob("*.jsonl"))
+        if f:
+            return f
     # 2) Cowork (Claude desktop app): the sandbox mounts the live session's
     #    transcript read-only under <mount>/.claude/projects/<slug>/<session>.jsonl.
-    #    Only the current session's project is present, so take the newest .jsonl.
     cowork_roots = [Path.home() / "mnt" / ".claude" / "projects"]
     sessions = Path("/sessions")
     if sessions.is_dir():
         cowork_roots.extend(sorted(sessions.glob("*/mnt/.claude/projects")))
-    for root in cowork_roots:
-        if not root.is_dir():
-            continue
-        files = sorted(root.glob("*/*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
-        if files:
-            return files[0]
-    return None
+    for r in cowork_roots:
+        if r.is_dir():
+            f = _newest(r.glob("*/*.jsonl"))
+            if f:
+                return f
+    # 3) No project context at all: newest transcript on the machine.
+    return _newest(root.glob("*/*.jsonl")) if root.is_dir() else None
 
 
-def resolve_transcript(arg):
+def locate_transcript(arg=None, session_id=None, project_dir=None):
+    """Transcript to analyse, or None. Explicit path (must exist) > session id
+    (searched across every project) > TOKEN_USAGE_TRANSCRIPT > newest for the
+    project dir (see find_latest_transcript)."""
     if arg:
-        return Path(arg)
+        p = Path(arg)
+        return p if p.is_file() else None
+    if session_id:
+        safe = re.sub(r"[^A-Za-z0-9_-]", "", str(session_id))
+        return _newest(projects_dir().glob(f"*/{safe}.jsonl")) if safe else None
     env = os.environ.get("TOKEN_USAGE_TRANSCRIPT")
     if env:
         return Path(env)
-    latest = find_latest_transcript()
-    if latest:
-        return latest
+    return find_latest_transcript(project_dir)
+
+
+def resolve_transcript(arg):
+    t = locate_transcript(arg)
+    if t:
+        return t
     sys.exit("token-usage: no transcript found — pass a path to a session .jsonl file")
 
 
