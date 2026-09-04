@@ -53,3 +53,18 @@ def write_jsonl(path, entries):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(json.dumps(e) for e in entries) + "\n")
     return path
+
+
+SERVER = Path(__file__).resolve().parent.parent / "scripts" / "mcp_server.py"
+
+
+@pytest.fixture
+def mcp():
+    """The MCP server module, bound to the SAME token_usage instance as `tu`
+    so monkeypatching either side is visible to both."""
+    import sys
+    sys.modules.setdefault("token_usage", _tu)
+    spec = importlib.util.spec_from_file_location("mcp_server", SERVER)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
