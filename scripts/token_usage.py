@@ -14,6 +14,7 @@ Subcommands:
     report [TRANSCRIPT]   Markdown breakdown table (default: latest session in cwd project)
     json   [TRANSCRIPT]   Same data as JSON
     hook                  Read Claude Code hook JSON on stdin, update the session ledger
+    top_consumers         Costliest sessions or commands in a window (--by, --since, --limit)
 
 Stdlib only. Python 3.9+.
 """
@@ -814,6 +815,73 @@ def render_history(data):
     return "\n".join(lines)
 
 
+def run_top_consumers(by="session", since="30d", project=None, limit=10):
+    """Costliest sessions (by="session") or command labels aggregated across
+    sessions (by="command") in a window. Unpriced rows sort last."""
+    pricing = load_pricing()
+    cutoff = since_cutoff(since)
+    unpriced = set()
+    sessions, commands = [], {}
+    for f in sorted(projects_dir().glob("*/*.jsonl")):
+        try:
+            s, _ = cached_summary(f, pricing)
+        except OSError:
+            continue
+        if cutoff and (s["first_ts"] or "") < cutoff:
+            continue
+        if project and project not in s["project"]:
+            continue
+        unpriced.update(unpriced_models(s.get("by_model", {}), pricing))
+        if by == "session":
+            sessions.append({"session_id": Path(s["path"]).stem, "path": s["path"],
+                             "project": s["project"], "first_ts": s["first_ts"],
+                             "usage": s["total"]["usage"],
+                             "cost_usd": s["total"]["cost_usd"]})
+            continue
+        for label, agg in s["by_label"].items():
+            c = commands.setdefault(label, {"label": label, "sessions": 0, "invocations": 0,
+                                            "usage": empty_usage(), "cost_usd": None})
+            c["sessions"] += 1
+            c["invocations"] += agg["invocations"]
+            for k in c["usage"]:
+                c["usage"][k] += agg["usage"].get(k, 0)
+            if agg["cost_usd"] is not None:
+                c["cost_usd"] = (c["cost_usd"] or 0.0) + agg["cost_usd"]
+    rows = sessions if by == "session" else list(commands.values())
+    key = "session_id" if by == "session" else "label"
+    rows.sort(key=lambda r: (r["cost_usd"] is None, -(r["cost_usd"] or 0.0), r[key]))
+    return {"by": by, "since": since, "project": project, "limit": limit,
+            "rows": rows[:limit], "unpriced_models": sorted(unpriced)}
+
+
+def render_top_consumers(data):
+    if not data["rows"]:
+        return "No sessions in window."
+    if data["by"] == "session":
+        lines = ["| Session | Project | Started | Output | Input | Cache read | Cache write | Est. cost |",
+                 "|---|---|---|---:|---:|---:|---:|---:|"]
+        for r in data["rows"]:
+            u = r["usage"]
+            lines.append(f"| {r['session_id']} | {r['project']} | {(r['first_ts'] or '')[:10]} "
+                         f"| {fmt_tokens(u['output'])} | {fmt_tokens(u['input'])} "
+                         f"| {fmt_tokens(u['cache_read'])} | {fmt_tokens(u['cache_5m'] + u['cache_1h'])} "
+                         f"| {fmt_cost(r['cost_usd'])} |")
+    else:
+        lines = ["| Command | Sessions | Calls | Output | Input | Cache read | Cache write | Est. cost |",
+                 "|---|---:|---:|---:|---:|---:|---:|---:|"]
+        for r in data["rows"]:
+            u = r["usage"]
+            name = r["label"] if r["label"] == OTHER_LABEL else f"`{r['label']}`"
+            lines.append(f"| {name} | {r['sessions']} | {r['invocations']} "
+                         f"| {fmt_tokens(u['output'])} | {fmt_tokens(u['input'])} "
+                         f"| {fmt_tokens(u['cache_read'])} | {fmt_tokens(u['cache_5m'] + u['cache_1h'])} "
+                         f"| {fmt_cost(r['cost_usd'])} |")
+    note = unpriced_footnote(data.get("unpriced_models") or [])
+    if note:
+        lines += ["", note]
+    return "\n".join(lines)
+
+
 # --- Insights ---------------------------------------------------------------
 # Thresholds are maintainer-tunable constants, deliberately not user-config
 # (YAGNI until someone asks). Every rule must state an action, not just an
@@ -1241,6 +1309,12 @@ def main():
     i.add_argument("--since", default=None)
     i.add_argument("--project", default=None)
     i.add_argument("--json", action="store_true", dest="as_json")
+    t = sub.add_parser("top_consumers")
+    t.add_argument("--by", choices=("session", "command"), default="session")
+    t.add_argument("--since", default="30d")
+    t.add_argument("--project", default=None)
+    t.add_argument("--limit", type=int, default=10)
+    t.add_argument("--json", action="store_true", dest="as_json")
     args = ap.parse_args()
 
     if args.cmd == "hook":
@@ -1267,6 +1341,13 @@ def main():
         result = run_insights(transcript=args.transcript, since=args.since,
                               project=args.project, budget=budget)
         print(json.dumps(result, indent=1) if args.as_json else render_insights(result))
+        return
+    if args.cmd == "top_consumers":
+        if args.limit < 1:
+            sys.exit("token-usage: --limit must be >= 1")
+        data = run_top_consumers(by=args.by, since=args.since,
+                                 project=args.project, limit=args.limit)
+        print(json.dumps(data, indent=1) if args.as_json else render_top_consumers(data))
         return
     if getattr(args, "diff", None):
         if getattr(args, "transcript", None):
