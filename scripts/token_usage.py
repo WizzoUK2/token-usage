@@ -706,6 +706,39 @@ def _local_day(ts):
         return ts[:10]
 
 
+def iter_summaries(pricing, cutoff=None, project=None, exclude=None, progress=False):
+    """Yield cached_summary() results for every transcript under projects_dir(),
+    applying the filters shared by every caller that scans the whole corpus:
+    an optional `cutoff` (skip sessions starting before it), an optional
+    `exclude` path (skip that one transcript — the session being analysed),
+    and an optional `project` substring filter (`project in s["project"]`).
+
+    compute_baseline needs *exact* project equality instead, so it deliberately
+    does not pass `project` here and filters the yielded summaries itself —
+    don't fold that exact-match rule into this generator.
+
+    `progress` prints run_history's stderr counter for freshly-parsed (not
+    cache-hit) transcripts; other callers leave it off.
+    """
+    parsed = 0
+    for f in sorted(projects_dir().glob("*/*.jsonl")):
+        try:
+            s, hit = cached_summary(f, pricing)
+        except OSError:
+            continue
+        if progress and not hit:
+            parsed += 1
+            if parsed % 25 == 0:
+                print(f"token-usage: parsed {parsed} transcripts…", file=sys.stderr)
+        if exclude and s["path"] == exclude:
+            continue
+        if cutoff and (s["first_ts"] or "") < cutoff:
+            continue
+        if project and project not in s["project"]:
+            continue
+        yield s
+
+
 def run_history(by="project", since=None, project=None):
     pricing = load_pricing()
     cutoff = since_cutoff(since)
@@ -721,21 +754,7 @@ def run_history(by="project", since=None, project=None):
             r["cost_usd"] = (r["cost_usd"] or 0.0) + cost
         r["calls"] += calls
 
-    parsed = 0
-    files = sorted(projects_dir().glob("*/*.jsonl"))
-    for f in files:
-        try:
-            s, hit = cached_summary(f, pricing)
-        except OSError:
-            continue
-        if not hit:
-            parsed += 1
-            if parsed % 25 == 0:
-                print(f"token-usage: parsed {parsed} transcripts…", file=sys.stderr)
-        if cutoff and (s["first_ts"] or "") < cutoff:
-            continue
-        if project and project not in s["project"]:
-            continue
+    for s in iter_summaries(pricing, cutoff=cutoff, project=project, progress=True):
         unpriced.update(unpriced_models(s.get("by_model", {}), pricing))
         if by == "project":
             add_row(s["project"], s["total"]["usage"], s["total"]["cost_usd"], 1)
@@ -822,15 +841,7 @@ def run_top_consumers(by="session", since="30d", project=None, limit=10):
     cutoff = since_cutoff(since)
     unpriced = set()
     sessions, commands = [], {}
-    for f in sorted(projects_dir().glob("*/*.jsonl")):
-        try:
-            s, _ = cached_summary(f, pricing)
-        except OSError:
-            continue
-        if cutoff and (s["first_ts"] or "") < cutoff:
-            continue
-        if project and project not in s["project"]:
-            continue
+    for s in iter_summaries(pricing, cutoff=cutoff, project=project):
         unpriced.update(unpriced_models(s.get("by_model", {}), pricing))
         if by == "session":
             sessions.append({"session_id": Path(s["path"]).stem, "path": s["path"],
@@ -923,14 +934,8 @@ def compute_baseline(pricing, project, days=30, exclude=None):
     transcript at `exclude` (the session being analysed)."""
     cutoff = since_cutoff(f"{days}d")
     session_costs, commands = [], {}
-    for f in sorted(projects_dir().glob("*/*.jsonl")):
-        try:
-            s, _ = cached_summary(f, pricing)
-        except OSError:
-            continue
-        if exclude and s["path"] == exclude:
-            continue
-        if (s["first_ts"] or "") < cutoff or s["project"] != project:
+    for s in iter_summaries(pricing, cutoff=cutoff, exclude=exclude):
+        if s["project"] != project:
             continue
         if s["total"]["cost_usd"] is not None:
             session_costs.append(s["total"]["cost_usd"])
@@ -1095,17 +1100,7 @@ def run_insights(transcript=None, since=None, project=None, budget=None):
     pricing = load_pricing()
     if since:
         cutoff = since_cutoff(since)
-        summaries = []
-        for f in sorted(projects_dir().glob("*/*.jsonl")):
-            try:
-                s, _ = cached_summary(f, pricing)
-            except OSError:
-                continue
-            if (s["first_ts"] or "") < cutoff:
-                continue
-            if project and project not in s["project"]:
-                continue
-            summaries.append(s)
+        summaries = list(iter_summaries(pricing, cutoff=cutoff, project=project))
         return {"mode": "window",
                 "findings": window_insights(summaries, cutoff, pricing),
                 "baseline": {"sessions": len(summaries), "since": since}}
