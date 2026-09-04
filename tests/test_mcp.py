@@ -156,3 +156,80 @@ def test_handler_prints_never_reach_stdout(mcp, capsys):
     out, err = capsys.readouterr()
     assert r == {"content": [{"type": "text", "text": "ok"}], "isError": False}
     assert out == "" and "progress" in err
+
+
+import os
+from conftest import assistant, usage, user, write_jsonl
+
+
+def seed(tmp_path, monkeypatch):
+    proj = tmp_path / "projects"
+    s1 = write_jsonl(proj / "-Users-x-alpha" / "aaa-111.jsonl", [
+        user("2026-06-10T10:00:00Z", command="/review"),
+        assistant("2026-06-10T10:00:01Z", usage(out=100_000), request_id="r1"),
+    ])
+    s2 = write_jsonl(proj / "-Users-x-beta" / "bbb-222.jsonl", [
+        user("2026-06-12T10:00:00Z", command="/review"),
+        assistant("2026-06-12T10:00:01Z", usage(out=40_000), request_id="r2"),
+        user("2026-06-12T10:02:00Z", command="/commit"),
+        assistant("2026-06-12T10:02:01Z", usage(out=20_000), request_id="r3"),
+    ])
+    os.utime(s1, (1_700_000_000, 1_700_000_000))
+    os.utime(s2, (1_700_000_100, 1_700_000_100))
+    monkeypatch.setenv("TOKEN_USAGE_PROJECTS_DIR", str(proj))
+    monkeypatch.setenv("TOKEN_USAGE_LEDGER_DIR", str(tmp_path / "cache"))
+    monkeypatch.delenv("TOKEN_USAGE_TRANSCRIPT", raising=False)
+    monkeypatch.delenv("TOKEN_USAGE_PROJECT_DIR", raising=False)
+    monkeypatch.chdir(tmp_path)
+    return proj, s1, s2
+
+
+def call(mcp, name, **arguments):
+    r = mcp.handle_message(req("tools/call", name=name, arguments=arguments))
+    res = r["result"]
+    return res["content"][0]["text"], res["isError"]
+
+
+def test_session_cost_json_default_names_transcript(mcp, tmp_path, monkeypatch):
+    proj, s1, s2 = seed(tmp_path, monkeypatch)
+    text, err = call(mcp, "session_cost", transcript=str(s1))
+    assert not err
+    data = json.loads(text)
+    assert data["transcript"] == str(s1)
+    assert data["by_label"]["/review"]["usage"]["output"] == 100_000
+    assert data["total"]["cost_usd"] == 5.0        # 100k out @ $50/MTok
+
+
+def test_session_cost_by_session_id_and_markdown(mcp, tmp_path, monkeypatch):
+    proj, s1, s2 = seed(tmp_path, monkeypatch)
+    text, err = call(mcp, "session_cost", session_id="bbb-222", format="markdown", models=True)
+    assert not err
+    assert text.startswith("| Activity |")
+    assert "`/commit`" in text and "↳ claude-fable-5" in text
+
+
+def test_session_cost_uses_project_dir_env_then_newest_anywhere(mcp, tmp_path, monkeypatch):
+    proj, s1, s2 = seed(tmp_path, monkeypatch)
+    monkeypatch.setenv("TOKEN_USAGE_PROJECT_DIR", "/Users/x/alpha")
+    assert json.loads(call(mcp, "session_cost")[0])["transcript"] == str(s1)
+    monkeypatch.delenv("TOKEN_USAGE_PROJECT_DIR")
+    assert json.loads(call(mcp, "session_cost")[0])["transcript"] == str(s2)
+
+
+def test_session_cost_not_found_is_a_tool_error(mcp, tmp_path, monkeypatch):
+    proj, s1, s2 = seed(tmp_path, monkeypatch)
+    text, err = call(mcp, "session_cost", session_id="zzz-000")
+    assert err and "zzz-000" in text and str(proj) in text
+    text, err = call(mcp, "session_cost", transcript=str(tmp_path / "gone.jsonl"))
+    assert err and "gone.jsonl" in text
+
+
+def test_diff_by_path_and_id(mcp, tmp_path, monkeypatch):
+    proj, s1, s2 = seed(tmp_path, monkeypatch)
+    data = json.loads(call(mcp, "diff", old=str(s1), new="bbb-222")[0])
+    review = next(r for r in data["rows"] if r["label"] == "/review")
+    assert review["delta_output"] == -60_000
+    md, err = call(mcp, "diff", old="aaa-111", new="bbb-222", format="markdown")
+    assert not err and md.startswith("| Activity | A cost | B cost |")
+    text, err = call(mcp, "diff", old="aaa-111", new="missing-1")
+    assert err and "missing-1" in text

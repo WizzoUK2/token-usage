@@ -207,6 +207,51 @@ def serve(stdin=None, stdout=None):
             stdout.flush()
 
 
+# --- tool handlers -----------------------------------------------------------
+
+def pick_transcript(path=None, session_id=None):
+    """Resolve a session per the spec order, or raise ToolError saying what was tried."""
+    project_dir = os.environ.get("TOKEN_USAGE_PROJECT_DIR") or None
+    t = tu.locate_transcript(path, session_id=session_id, project_dir=project_dir)
+    if t:
+        return t
+    if path:
+        raise ToolError(f"transcript not found: {path}")
+    if session_id:
+        raise ToolError(f"no transcript for session id {session_id!r} under {tu.projects_dir()}")
+    where = f"{tu.projects_dir()}" + (f" (project dir {project_dir})" if project_dir else "")
+    raise ToolError(f"no transcript found under {where}; pass transcript or session_id")
+
+
+def finish(data, render, fmt):
+    return render(data) if fmt == "markdown" else json.dumps(data)
+
+
+def tool_session_cost(args):
+    t = pick_transcript(args.get("transcript"), args.get("session_id"))
+    data = tu.aggregate(tu.parse_session(t), tu.load_pricing())
+    data["transcript"] = str(t)
+    return finish(data,
+                  lambda d: tu.render_report(d, show_agents=bool(args.get("agents")),
+                                             show_models=bool(args.get("models"))),
+                  args.get("format"))
+
+
+def _path_or_id(value):
+    """diff accepts either form per side: an existing path wins, else a session id."""
+    p = Path(value)
+    return pick_transcript(path=value) if p.is_file() else pick_transcript(session_id=value)
+
+
+def tool_diff(args):
+    old, new = _path_or_id(args["old"]), _path_or_id(args["new"])
+    data = tu.diff_data(old, new, tu.load_pricing())
+    return finish(data, tu.render_diff, args.get("format"))
+
+
+HANDLERS.update({"session_cost": tool_session_cost, "diff": tool_diff})
+
+
 if __name__ == "__main__":
     try:
         serve()
