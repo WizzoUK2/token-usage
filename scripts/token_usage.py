@@ -541,6 +541,13 @@ def render_report(data, show_agents=False, show_models=False):
     )
     models = ", ".join(sorted(t["models"]))
     lines.append("")
+    transcript_path = data.get("transcript_path")
+    if transcript_path:
+        # Resolution can fall back to a transcript in a project other than
+        # the caller's (see find_latest_transcript) — always name which one
+        # was actually measured, rather than leaving that silent.
+        tp = Path(transcript_path)
+        lines.append(f"Session: `{tp.parent.name}/{tp.name}`")
     savings = t.get("cache_savings_usd")
     if savings is not None and savings >= 0.01:
         lines.append(f"Prompt caching saved ~{fmt_cost(savings)} vs. full input rates.")
@@ -1039,13 +1046,19 @@ def run_insights(transcript=None, since=None, project=None, budget=None):
     baseline = compute_baseline(pricing, project=t.parent.name, exclude=str(t))
     return {"mode": "session",
             "findings": session_insights(data, baseline, budget=budget),
-            "baseline": baseline}
+            "baseline": baseline,
+            "transcript_path": str(t)}
 
 
 def render_insights(result):
     if not result["findings"]:
         return "No notable findings."
-    return "\n".join(f"- [{f['severity']}] {f['message']}" for f in result["findings"])
+    lines = [f"- [{f['severity']}] {f['message']}" for f in result["findings"]]
+    transcript_path = result.get("transcript_path")
+    if transcript_path:
+        tp = Path(transcript_path)
+        lines.append(f"(session: {tp.parent.name}/{tp.name})")
+    return "\n".join(lines)
 
 
 def project_slug(path_str):
@@ -1059,26 +1072,42 @@ def _newest(paths):
     return max(paths, key=lambda p: p.stat().st_mtime) if paths else None
 
 
-def find_latest_transcript(project_dir=None):
-    """Newest transcript for a project (default: cwd), or None.
+def _cowork_roots():
+    """Cowork sandbox mount roots that might hold the live session's
+    transcript, read-only, under <mount>/.claude/projects/<slug>/<id>.jsonl.
+    A separate function so tests can neutralise it without depending on
+    where this machine's real HOME or /sessions happen to point."""
+    roots = [Path.home() / "mnt" / ".claude" / "projects"]
+    sessions = Path("/sessions")
+    if sessions.is_dir():
+        roots.extend(sorted(sessions.glob("*/mnt/.claude/projects")))
+    return roots
 
-    Order: the project's own directory under projects_dir(); the Cowork sandbox
-    mounts (which hold exactly the live session); then the newest transcript in
-    any project — the Claude desktop case, where there is no project dir."""
+
+def find_latest_transcript(project_dir=None):
+    """Newest transcript for a project, or None.
+
+    project_dir=None means "no project context to anchor on" (e.g. Claude
+    desktop, or the MCP server with no caller-supplied hint): try cwd's own
+    project directory, then the Cowork sandbox mounts (which hold exactly the
+    live session), then the newest transcript under any project at all.
+
+    An *explicit* project_dir only ever looks at that project's own
+    directory — if it has no transcripts, that's None, not a guess at some
+    other project's session."""
     root = projects_dir()
+    explicit = project_dir is not None
+    target = Path(project_dir).expanduser().resolve() if explicit else Path.cwd()
     # 1) Claude Code: <projects>/<slug>/*.jsonl
-    slug_dir = root / project_slug(str(project_dir or Path.cwd()))
+    slug_dir = root / project_slug(str(target))
     if slug_dir.is_dir():
         f = _newest(slug_dir.glob("*.jsonl"))
         if f:
             return f
-    # 2) Cowork (Claude desktop app): the sandbox mounts the live session's
-    #    transcript read-only under <mount>/.claude/projects/<slug>/<session>.jsonl.
-    cowork_roots = [Path.home() / "mnt" / ".claude" / "projects"]
-    sessions = Path("/sessions")
-    if sessions.is_dir():
-        cowork_roots.extend(sorted(sessions.glob("*/mnt/.claude/projects")))
-    for r in cowork_roots:
+    if explicit:
+        return None
+    # 2) Cowork (Claude desktop app).
+    for r in _cowork_roots():
         if r.is_dir():
             f = _newest(r.glob("*/*.jsonl"))
             if f:
@@ -1089,8 +1118,8 @@ def find_latest_transcript(project_dir=None):
 
 def locate_transcript(arg=None, session_id=None, project_dir=None):
     """Transcript to analyse, or None. Explicit path (must exist) > session id
-    (searched across every project) > TOKEN_USAGE_TRANSCRIPT > newest for the
-    project dir (see find_latest_transcript)."""
+    (searched across every project) > TOKEN_USAGE_TRANSCRIPT (must exist) >
+    newest for the project dir (see find_latest_transcript)."""
     if arg:
         p = Path(arg)
         return p if p.is_file() else None
@@ -1099,7 +1128,8 @@ def locate_transcript(arg=None, session_id=None, project_dir=None):
         return _newest(projects_dir().glob(f"*/{safe}.jsonl")) if safe else None
     env = os.environ.get("TOKEN_USAGE_TRANSCRIPT")
     if env:
-        return Path(env)
+        p = Path(env)
+        return p if p.is_file() else None
     return find_latest_transcript(project_dir)
 
 

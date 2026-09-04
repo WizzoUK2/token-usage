@@ -4,7 +4,7 @@ import os
 from conftest import assistant, usage, user, write_jsonl
 
 
-def seed(tmp_path, monkeypatch):
+def seed(tmp_path, monkeypatch, tu):
     proj = tmp_path / "projects"
     a = write_jsonl(proj / "-Users-x-alpha" / "aaa-111.jsonl", [
         user("2026-06-10T10:00:00Z"),
@@ -19,17 +19,22 @@ def seed(tmp_path, monkeypatch):
     os.utime(b, (1_700_000_100, 1_700_000_100))
     monkeypatch.setenv("TOKEN_USAGE_PROJECTS_DIR", str(proj))
     monkeypatch.delenv("TOKEN_USAGE_TRANSCRIPT", raising=False)
+    # This suite must not see whatever Cowork sandbox mounts happen to exist
+    # on the machine it runs on (real HOME/mnt/.claude/projects, or
+    # /sessions/*/mnt/.claude/projects) — neutralise that lookup entirely so
+    # results depend only on the seeded `proj` tree above.
+    monkeypatch.setattr(tu, "_cowork_roots", lambda: [])
     return proj, a, b
 
 
 def test_explicit_path_wins_and_must_exist(tu, tmp_path, monkeypatch):
-    proj, a, b = seed(tmp_path, monkeypatch)
+    proj, a, b = seed(tmp_path, monkeypatch, tu)
     assert tu.locate_transcript(str(a)) == a
     assert tu.locate_transcript(str(tmp_path / "missing.jsonl")) is None
 
 
 def test_session_id_is_searched_across_projects(tu, tmp_path, monkeypatch):
-    proj, a, b = seed(tmp_path, monkeypatch)
+    proj, a, b = seed(tmp_path, monkeypatch, tu)
     assert tu.locate_transcript(session_id="aaa-111") == a
     assert tu.locate_transcript(session_id="nope-999") is None
     # Path characters are stripped so an id can never escape the projects dir.
@@ -37,23 +42,52 @@ def test_session_id_is_searched_across_projects(tu, tmp_path, monkeypatch):
 
 
 def test_project_dir_picks_that_projects_newest(tu, tmp_path, monkeypatch):
-    proj, a, b = seed(tmp_path, monkeypatch)
+    proj, a, b = seed(tmp_path, monkeypatch, tu)
     # slug("/Users/x/alpha") == "-Users-x-alpha"
     assert tu.locate_transcript(project_dir="/Users/x/alpha") == a
     assert tu.find_latest_transcript(project_dir="/Users/x/beta") == b
 
 
-def test_unknown_project_falls_back_to_newest_anywhere(tu, tmp_path, monkeypatch):
-    proj, a, b = seed(tmp_path, monkeypatch)
+def test_explicit_project_dir_with_no_sessions_is_none(tu, tmp_path, monkeypatch):
+    # An explicit project_dir that matches no project must never fall back to
+    # guessing some *other* project's transcript — that would silently
+    # attribute the report to the wrong session.
+    proj, a, b = seed(tmp_path, monkeypatch, tu)
+    assert tu.locate_transcript(project_dir="/Users/x/nothing-here") is None
+    assert tu.find_latest_transcript(project_dir="/Users/x/nothing-here") is None
+
+
+def test_explicit_project_dir_is_normalised(tu, tmp_path, monkeypatch):
+    proj, a, b = seed(tmp_path, monkeypatch, tu)
+    # Trailing separator, "~"-relative and non-canonical forms must all slug
+    # to the same project as the canonical absolute path.
+    monkeypatch.setenv("HOME", "/Users/x")
+    assert tu.locate_transcript(project_dir="/Users/x/alpha/") == a
+    assert tu.locate_transcript(project_dir="~/alpha") == a
+
+
+def test_unrecognised_cwd_falls_back_to_newest_anywhere(tu, tmp_path, monkeypatch):
+    # No project_dir at all (the default) means "no project context to
+    # anchor on" — e.g. Claude desktop, or a bare CLI invocation — so this
+    # is the one case allowed to fall back to the newest transcript anywhere.
+    proj, a, b = seed(tmp_path, monkeypatch, tu)
     monkeypatch.chdir(tmp_path)  # cwd slug matches no project either
-    assert tu.locate_transcript(project_dir="/Users/x/nothing-here") == b
     assert tu.locate_transcript() == b
 
 
 def test_env_transcript_overrides_discovery(tu, tmp_path, monkeypatch):
-    proj, a, b = seed(tmp_path, monkeypatch)
+    proj, a, b = seed(tmp_path, monkeypatch, tu)
     monkeypatch.setenv("TOKEN_USAGE_TRANSCRIPT", str(a))
     assert tu.locate_transcript(project_dir="/Users/x/beta") == a
+
+
+def test_env_transcript_missing_file_returns_none(tu, tmp_path, monkeypatch):
+    # TOKEN_USAGE_TRANSCRIPT must be validated like every other explicit
+    # source — a stale/typo'd path fails closed instead of handing back a
+    # Path that blows up downstream with an unhandled FileNotFoundError.
+    proj, a, b = seed(tmp_path, monkeypatch, tu)
+    monkeypatch.setenv("TOKEN_USAGE_TRANSCRIPT", str(tmp_path / "gone.jsonl"))
+    assert tu.locate_transcript() is None
 
 
 def test_resolve_transcript_exits_when_nothing_found(tu, tmp_path, monkeypatch):

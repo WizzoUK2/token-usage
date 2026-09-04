@@ -184,11 +184,16 @@ Used by `session_cost`, `insights` (session mode) and `diff`. Order:
 1. explicit `transcript` path — must exist, else error;
 2. `session_id` — glob `<projects>/*/<id>.jsonl`; zero matches error,
    several matches pick the newest by mtime;
-3. `TOKEN_USAGE_PROJECT_DIR` set — newest `.jsonl` under
-   `<projects>/<slug(project_dir)>/`;
-4. the Cowork mount roots (they hold exactly the live session), then the
-   newest `.jsonl` under any project (Claude desktop, where no project dir
-   exists).
+3. `TOKEN_USAGE_TRANSCRIPT` env var — must exist, else error (it overrides
+   an explicitly supplied `project_dir`, same as it overrides cwd);
+4. `TOKEN_USAGE_PROJECT_DIR` / caller-supplied `project_dir` set — newest
+   `.jsonl` under `<projects>/<slug(project_dir)>/`, or error if that
+   project has none. An explicit `project_dir` never falls through to step
+   5 — reporting a *different* project's session with no indication would
+   be worse than a clean "not found";
+5. no `project_dir` at all (no project context to anchor on — Claude
+   desktop, or a bare CLI invocation): the Cowork mount roots (they hold
+   exactly the live session), then the newest `.jsonl` under any project.
 
 The analyser gains `locate_transcript(arg=None, session_id=None,
 project_dir=None)` returning a `Path` or `None`; the CLI's
