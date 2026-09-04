@@ -74,3 +74,85 @@ def test_serve_frames_one_json_per_line_and_survives_garbage(mcp):
     assert [l.get("id") for l in lines] == [1, None, 2]
     assert lines[1]["error"]["code"] == -32700
     assert lines[2]["result"] == {}
+
+
+TOOL_NAMES = {"session_cost", "history", "insights", "diff", "top_consumers"}
+
+
+def test_tools_list_names_and_schema_shape(mcp):
+    r = mcp.handle_message(req("tools/list"))
+    tools = r["result"]["tools"]
+    assert {t["name"] for t in tools} == TOOL_NAMES
+    for t in tools:
+        s = t["inputSchema"]
+        assert t["description"]
+        assert s["type"] == "object" and s["additionalProperties"] is False
+        assert "format" in s["properties"]
+        assert s["properties"]["format"]["enum"] == ["json", "markdown"]
+    by_name = {t["name"]: t for t in tools}
+    assert by_name["diff"]["inputSchema"]["required"] == ["old", "new"]
+    assert by_name["history"]["inputSchema"]["properties"]["by"]["enum"] == \
+        ["project", "day", "command", "model"]
+    assert by_name["top_consumers"]["inputSchema"]["properties"]["limit"]["minimum"] == 1
+
+
+def test_validate_args_reports_every_problem(mcp):
+    schema = {"type": "object", "additionalProperties": False,
+              "required": ["old"],
+              "properties": {"old": {"type": "string"},
+                             "limit": {"type": "integer", "minimum": 1},
+                             "flag": {"type": "boolean"},
+                             "budget": {"type": "number"},
+                             "by": {"type": "string", "enum": ["a", "b"]}}}
+    problems = mcp.validate_args(schema, {"limit": 0, "flag": "yes", "budget": True,
+                                          "by": "zzz", "bogus": 1})
+    joined = "; ".join(problems)
+    for needle in ("old", "limit", "flag", "budget", "by", "bogus"):
+        assert needle in joined, needle
+    assert mcp.validate_args(schema, {"old": "x", "limit": 3, "budget": 2.5, "by": "a"}) == []
+    assert mcp.validate_args(schema, "not an object") == ["arguments must be an object"]
+
+
+def test_tools_call_requires_name(mcp):
+    r = mcp.handle_message(req("tools/call", arguments={}))
+    assert r["error"]["code"] == -32602
+
+
+def test_unknown_tool_is_a_tool_error_not_protocol_error(mcp):
+    r = mcp.handle_message(req("tools/call", name="nope", arguments={}))
+    assert "error" not in r
+    assert r["result"]["isError"] is True
+    assert "unknown tool" in r["result"]["content"][0]["text"]
+
+
+def test_invalid_arguments_are_a_tool_error(mcp):
+    r = mcp.handle_message(req("tools/call", name="history", arguments={"by": "galaxy"}))
+    res = r["result"]
+    assert res["isError"] is True and "by" in res["content"][0]["text"]
+
+
+def test_call_tool_wraps_exceptions_and_sys_exit(mcp, monkeypatch):
+    mcp.HANDLERS["boom"] = lambda args: 1 / 0
+    mcp.SCHEMAS["boom"] = {"type": "object", "properties": {}, "additionalProperties": False}
+    r = mcp.call_tool("boom", {})
+    assert r["isError"] and "ZeroDivisionError" in r["content"][0]["text"]
+
+    def exits(args):
+        import sys
+        sys.exit("token-usage: invalid --since value")
+    mcp.HANDLERS["exits"] = exits
+    mcp.SCHEMAS["exits"] = mcp.SCHEMAS["boom"]
+    r = mcp.call_tool("exits", {})
+    assert r["isError"] and "invalid --since" in r["content"][0]["text"]
+
+
+def test_handler_prints_never_reach_stdout(mcp, capsys):
+    def chatty(args):
+        print("progress…")          # analyser-style stderr chatter, but on stdout
+        return "ok"
+    mcp.HANDLERS["chatty"] = chatty
+    mcp.SCHEMAS["chatty"] = {"type": "object", "properties": {}, "additionalProperties": False}
+    r = mcp.call_tool("chatty", {})
+    out, err = capsys.readouterr()
+    assert r == {"content": [{"type": "text", "text": "ok"}], "isError": False}
+    assert out == "" and "progress" in err
