@@ -262,3 +262,22 @@ def test_history_by_day_splits_sessions_across_days(tu, monkeypatch, tmp_path):
     assert rows[day1]["usage"]["output"] == 100
     assert rows[day2]["usage"]["output"] == 300
     assert rows[day1]["calls"] == 1 and rows[day2]["calls"] == 1  # touches both days
+
+
+def test_index_recomputes_when_pricing_changes(tu, monkeypatch, tmp_path):
+    # A pricing update (bundled or user overlay) must not leave stale cached
+    # costs in the history index, which only re-validates by (mtime, size).
+    monkeypatch.setenv("TOKEN_USAGE_LEDGER_DIR", str(tmp_path / "cache"))
+    t = write_jsonl(tmp_path / "projects" / "proj-a" / "s1.jsonl", [
+        user("2026-07-01T10:00:00Z"),
+        assistant("2026-07-01T10:00:05Z", usage(out=1_000_000),
+                  model="claude-sonnet-5", request_id="r1"),
+    ])
+    old = {"claude-sonnet-5": {"input": 3.0, "output": 15.0}}
+    new = {"claude-sonnet-5": {"input": 2.0, "output": 10.0}}
+    s1, hit1 = tu.cached_summary(t, old)
+    s2, hit2 = tu.cached_summary(t, old)
+    s3, hit3 = tu.cached_summary(t, new)
+    assert (hit1, hit2, hit3) == (False, True, False)
+    assert s1["total"]["cost_usd"] == 15.0
+    assert s3["total"]["cost_usd"] == 10.0

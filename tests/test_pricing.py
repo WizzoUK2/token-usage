@@ -64,7 +64,29 @@ def test_non_utf8_overlay_is_skipped_with_warning(tu, monkeypatch, tmp_path, cap
 
 def test_no_overlay_matches_bundled(tu, monkeypatch, tmp_path):
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "nowhere"))
-    assert tu.load_pricing()["claude-sonnet-5"] == {"input": 3.0, "output": 15.0}
+    assert tu.load_pricing()["claude-sonnet-5"] == {"input": 2.0, "output": 10.0}
+
+
+def test_overlay_accepts_optional_cache_read_rate(tu, monkeypatch, tmp_path):
+    p = tmp_path / "cfg" / "token-usage" / "pricing.json"
+    p.parent.mkdir(parents=True)
+    p.write_text(json.dumps({
+        "claude-newmodel-7": {"input": 4.0, "output": 20.0, "cache_read": 0.1},
+    }))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+    pricing = tu.load_pricing()
+    assert pricing["claude-newmodel-7"] == {"input": 4.0, "output": 20.0, "cache_read": 0.1}
+
+
+def test_overlay_rejects_non_numeric_cache_read(tu, monkeypatch, tmp_path, capsys):
+    p = tmp_path / "cfg" / "token-usage" / "pricing.json"
+    p.parent.mkdir(parents=True)
+    p.write_text(json.dumps({"claude-fable-5-1": {"input": 10.0, "output": 50.0,
+                                                  "cache_read": "cheap"}}))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+    pricing = tu.load_pricing()
+    assert pricing["claude-fable-5-1"] == {"input": 10.0, "output": 50.0, "cache_read": 0.25}
+    assert "claude-fable-5-1" in capsys.readouterr().err
 
 
 def test_unpriced_models_helper(tu):

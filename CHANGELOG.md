@@ -6,6 +6,35 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- **Pricing:** `claude-fable-5-1`, `claude-mythos-5-1` ($10/$50, cache hits
+  $0.25/MTok) and `claude-opus-5` ($5/$25) in the bundled table. Fable 5.1
+  usage previously fell through the prefix matcher to the `claude-fable-5`
+  entry — right per-token rates, but cache reads overstated 4×. Legacy
+  `claude-3-5-haiku` ($0.80/$4) added so old transcripts price too.
+- **Per-model cache-hit rate** — pricing entries (bundled or user overlay)
+  accept an optional `"cache_read"` ($/MTok). When present it replaces the
+  0.1× input multiplier for that model in both cost and cache-savings
+  figures; entries without it behave exactly as before. A non-numeric
+  `cache_read` invalidates the entry (warned, skipped), like `input`/`output`.
+
+### Changed
+
+- **Sonnet 5 priced at $2/$10** (was $3/$15). Anthropic made the launch
+  price permanent in September 2026 instead of raising it, so the "promo not
+  modelled" caveat is gone. Sonnet 5 session costs drop by a third vs 0.5.0.
+
+### Fixed
+
+- **History index no longer serves stale costs after a pricing change.**
+  Cached per-transcript summaries bake `cost_usd` in but were re-validated
+  only by (mtime, size), so `history --by project|day|command` and the
+  `insights` 30-day baseline kept pricing old rates until a transcript
+  changed. Entries now also carry a fingerprint of the effective pricing
+  table (bundled + overlay) and re-parse when it differs. Expect a one-off
+  full re-scan on first run after upgrading.
+
 ## [0.5.0] — 2026-07-09
 
 ### Added

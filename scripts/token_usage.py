@@ -29,12 +29,17 @@ COMMAND_RE = re.compile(r"<command-name>([^<]+)</command-name>")
 OTHER_LABEL = "(no command)"
 LEDGER_DIR = Path(os.environ.get("TOKEN_USAGE_LEDGER_DIR", Path.home() / ".cache" / "token-usage"))
 
-# Per-MTok USD rates. Cache read = 0.1x input; cache write = 1.25x (5m TTL) / 2x (1h TTL).
+# Per-MTok USD rates. Cache read = 0.1x input unless the entry carries an explicit
+# "cache_read" rate (Fable/Mythos 5.1 bill hits at $0.25/MTok, i.e. 0.025x);
+# cache write = 1.25x (5m TTL) / 2x (1h TTL).
 # Keys are matched by longest prefix against the model ID, so dated IDs resolve too.
 DEFAULT_PRICING = {
+    "claude-fable-5-1": {"input": 10.0, "output": 50.0, "cache_read": 0.25},
+    "claude-mythos-5-1": {"input": 10.0, "output": 50.0, "cache_read": 0.25},
     "claude-fable-5": {"input": 10.0, "output": 50.0},
     "claude-mythos-5": {"input": 10.0, "output": 50.0},
-    "claude-sonnet-5": {"input": 3.0, "output": 15.0},
+    "claude-opus-5": {"input": 5.0, "output": 25.0},
+    "claude-sonnet-5": {"input": 2.0, "output": 10.0},
     "claude-opus-4-8": {"input": 5.0, "output": 25.0},
     "claude-opus-4-7": {"input": 5.0, "output": 25.0},
     "claude-opus-4-6": {"input": 5.0, "output": 25.0},
@@ -45,6 +50,7 @@ DEFAULT_PRICING = {
     "claude-sonnet-4-5": {"input": 3.0, "output": 15.0},
     "claude-sonnet-4": {"input": 3.0, "output": 15.0},
     "claude-haiku-4-5": {"input": 1.0, "output": 5.0},
+    "claude-3-5-haiku": {"input": 0.8, "output": 4.0},
 }
 CACHE_READ_MULT = 0.1
 CACHE_5M_MULT = 1.25
@@ -57,10 +63,15 @@ def user_pricing_path():
     return Path(base) / "token-usage" / "pricing.json"
 
 
+def _is_rate(x):
+    return isinstance(x, (int, float)) and not isinstance(x, bool)
+
+
 def _valid_rates(v):
+    """{"input": $/MTok, "output": $/MTok} plus an optional "cache_read" $/MTok."""
     return (isinstance(v, dict)
-            and isinstance(v.get("input"), (int, float)) and not isinstance(v.get("input"), bool)
-            and isinstance(v.get("output"), (int, float)) and not isinstance(v.get("output"), bool))
+            and _is_rate(v.get("input")) and _is_rate(v.get("output"))
+            and ("cache_read" not in v or _is_rate(v["cache_read"])))
 
 
 def load_pricing():
@@ -162,22 +173,27 @@ def cost_usd(by_model, pricing):
         total += (
             bucket["input"] * inp
             + bucket["output"] * out
-            + bucket["cache_read"] * inp * CACHE_READ_MULT
+            + bucket["cache_read"] * cache_read_rate(rates) / 1e6
             + bucket["cache_5m"] * inp * CACHE_5M_MULT
             + bucket["cache_1h"] * inp * CACHE_1H_MULT
         )
     return total if priced else None
 
 
+def cache_read_rate(rates):
+    """$/MTok for cache hits: the entry's own rate if given, else 0.1x input."""
+    return rates.get("cache_read", rates["input"] * CACHE_READ_MULT)
+
+
 def cache_savings_usd(by_model, pricing):
-    """USD saved by cache reads being billed at 0.1x instead of the full input rate."""
+    """USD saved by cache reads being billed at the cache-hit rate instead of full input."""
     total, priced = 0.0, False
     for model, bucket in by_model.items():
         rates = rates_for(model, pricing)
         if not rates:
             continue
         priced = True
-        total += bucket["cache_read"] * rates["input"] / 1e6 * (1 - CACHE_READ_MULT)
+        total += bucket["cache_read"] * (rates["input"] - cache_read_rate(rates)) / 1e6
     return total if priced else None
 
 
@@ -591,6 +607,13 @@ def index_dir():
                                Path.home() / ".cache" / "token-usage")) / "index"
 
 
+def pricing_fingerprint(pricing):
+    """Stable hash of a pricing table; cached summaries bake costs in, so a rate
+    change (bundled update or user overlay edit) must invalidate them."""
+    import hashlib
+    return hashlib.sha1(json.dumps(pricing, sort_keys=True).encode()).hexdigest()
+
+
 def summarize_transcript(path, pricing, st=None):
     # Stat BEFORE parsing: if the transcript is appended mid-parse, the recorded
     # mtime is then stale and the next run re-parses — never a silently stale cache.
@@ -606,6 +629,7 @@ def summarize_transcript(path, pricing, st=None):
     return {
         "version": INDEX_VERSION, "path": str(path),
         "mtime_ns": st.st_mtime_ns, "size": st.st_size,
+        "pricing": pricing_fingerprint(pricing),
         "project": path.parent.name,
         "first_ts": next((s["start_ts"] for s in segs if s["start_ts"]), None),
         "by_label": {label: {"usage": agg["usage"], "cost_usd": agg["cost_usd"],
@@ -628,7 +652,8 @@ def cached_summary(path, pricing):
         try:
             c = json.loads(cache_file.read_text())
             if (c.get("version") == INDEX_VERSION
-                    and c.get("mtime_ns") == st.st_mtime_ns and c.get("size") == st.st_size):
+                    and c.get("mtime_ns") == st.st_mtime_ns and c.get("size") == st.st_size
+                    and c.get("pricing") == pricing_fingerprint(pricing)):
                 return c, True
         except (json.JSONDecodeError, OSError):
             pass

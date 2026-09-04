@@ -26,7 +26,7 @@ Claude Code tells you session totals (`/cost`, OTel metrics) and tools like ccus
 - **Burn rate** — `history --since 7d` appends an average $/day and a projected $/week for the window.
 - **Compare mode** — `report --diff OLD NEW` (and `json --diff`) shows per-label cost and output deltas between two transcripts. Deterministic ordering; when either side has unresolvable model pricing the delta renders as `—` rather than silently faking a saving.
 - **Correct dedup** — Claude Code writes the same API request's usage to multiple transcript entries while streaming. token-usage dedups by `requestId`, keeping per-field maxima across duplicates (robust to partial snapshots); a naive sum overcounts ~2.5×.
-- **Cache-aware cost estimates** — per-model pricing with cache reads at 0.1×, 5-minute cache writes at 1.25×, and 1-hour cache writes at 2× the input rate. Mixed-model sessions (e.g. Opus main loop + Haiku subagents) are priced per model, and reports show what prompt caching saved you. Bedrock (`us.anthropic.…`) and OpenRouter-style (`anthropic/…`) model IDs resolve too.
+- **Cache-aware cost estimates** — per-model pricing with cache reads at 0.1× the input rate (0.025× on Fable 5.1 and Mythos 5.1), 5-minute cache writes at 1.25×, and 1-hour cache writes at 2×. Mixed-model sessions (e.g. Opus main loop + Haiku subagents) are priced per model, and reports show what prompt caching saved you. Bedrock (`us.anthropic.…`) and OpenRouter-style (`anthropic/…`) model IDs resolve too.
 - **Budget nudges** — set `TOKEN_USAGE_BUDGET_USD` and the Stop hook emits a `systemMessage` warning when the session's estimated cost crosses the threshold, and again at each further multiple (2×, 3×, …). At most one warning per multiple.
 - **Live ledger** — Stop and SubagentStop hooks keep `~/.cache/token-usage/<session-id>.json` current after every turn and every finished subagent, so reports are instant and a statusline stays fresh even during long multi-agent turns.
 - **Insights** — `insights` runs rule-based checks over the current session
@@ -161,7 +161,7 @@ The `history` subcommand builds an incremental index under `~/.cache/token-usage
 
 ## Cost disclaimer
 
-Costs are **API-price estimates** from the bundled `data/pricing.json` (rates as of July 2026). Subscription plans (Pro/Max) are not billed per token — treat the figure as "what this would cost at API prices". Update `data/pricing.json` if rates change; models not in the table show `—`. Rates can be added to the user pricing overlay at `~/.config/token-usage/pricing.json`, and unpriced models are named in a report footnote either way. Sonnet 5 is priced at its $3/$15 sticker rate — the introductory $2/$10 promo (through 2026-08-31) is not modelled.
+Costs are **API-price estimates** from the bundled `data/pricing.json` (rates as of September 2026). Subscription plans (Pro/Max) are not billed per token — treat the figure as "what this would cost at API prices". Update `data/pricing.json` if rates change; models not in the table show `—`. Rates can be added to the user pricing overlay at `~/.config/token-usage/pricing.json`, and unpriced models are named in a report footnote either way. Each entry is `{"input": $/MTok, "output": $/MTok}` with an optional `"cache_read": $/MTok` for models whose cache-hit rate is not 0.1× input (bundled for Fable 5.1 and Mythos 5.1 at $0.25). Sonnet 5 is priced at $2/$10 — its launch price, which Anthropic made permanent in September 2026 instead of raising it to $3/$15.
 
 ## Limitations
 

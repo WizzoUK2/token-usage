@@ -81,8 +81,8 @@ Use session mode (no `--since`) when the user asks about the current or a specif
 
 - **Activity** — a slash command (one row per command name, summed across invocations), a skill invoked via the Skill tool in Cowork (also shown as `/skill-name`), or `(no command)` for turns before the first command/skill in the session. `(+N agents)` means N subagent transcripts were rolled up into that row.
 - **Output** — tokens the model generated; the dominant cost driver at 5× the input rate.
-- **Cache read / Cache write** — prompt-cache traffic. Cache reads cost ~0.1× the input rate; large cache-read numbers are normal for long sessions and much cheaper than they look.
-- **Est. cost** — computed per model from the bundled pricing table (`data/pricing.json`), cache-aware (5m writes at 1.25×, 1h writes at 2×). `—` means the model was not in the pricing table.
+- **Cache read / Cache write** — prompt-cache traffic. Cache reads cost ~0.1× the input rate (0.025× on Fable 5.1 / Mythos 5.1); large cache-read numbers are normal for long sessions and much cheaper than they look.
+- **Est. cost** — computed per model from the bundled pricing table (`data/pricing.json`) plus any user overlay, cache-aware (5m writes at 1.25×, 1h writes at 2×, reads at the model's cache-hit rate). `—` means the model was not in the pricing table.
 
 ## Troubleshooting
 
