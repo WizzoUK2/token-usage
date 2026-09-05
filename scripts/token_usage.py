@@ -14,6 +14,9 @@ Subcommands:
     report [TRANSCRIPT]   Markdown breakdown table (default: latest session in cwd project)
     json   [TRANSCRIPT]   Same data as JSON
     hook                  Read Claude Code hook JSON on stdin, update the session ledger
+    history               Cross-session rollup by project/day/command/model (--by, --since)
+    insights              Rule-based findings for one session or a window (--since)
+    top_consumers         Costliest sessions or commands in a window (--by, --since, --limit)
 
 Stdlib only. Python 3.9+.
 """
@@ -29,12 +32,17 @@ COMMAND_RE = re.compile(r"<command-name>([^<]+)</command-name>")
 OTHER_LABEL = "(no command)"
 LEDGER_DIR = Path(os.environ.get("TOKEN_USAGE_LEDGER_DIR", Path.home() / ".cache" / "token-usage"))
 
-# Per-MTok USD rates. Cache read = 0.1x input; cache write = 1.25x (5m TTL) / 2x (1h TTL).
+# Per-MTok USD rates. Cache read = 0.1x input unless the entry carries an explicit
+# "cache_read" rate (Fable/Mythos 5.1 bill hits at $0.25/MTok, i.e. 0.025x);
+# cache write = 1.25x (5m TTL) / 2x (1h TTL).
 # Keys are matched by longest prefix against the model ID, so dated IDs resolve too.
 DEFAULT_PRICING = {
+    "claude-fable-5-1": {"input": 10.0, "output": 50.0, "cache_read": 0.25},
+    "claude-mythos-5-1": {"input": 10.0, "output": 50.0, "cache_read": 0.25},
     "claude-fable-5": {"input": 10.0, "output": 50.0},
     "claude-mythos-5": {"input": 10.0, "output": 50.0},
-    "claude-sonnet-5": {"input": 3.0, "output": 15.0},
+    "claude-opus-5": {"input": 5.0, "output": 25.0},
+    "claude-sonnet-5": {"input": 2.0, "output": 10.0},
     "claude-opus-4-8": {"input": 5.0, "output": 25.0},
     "claude-opus-4-7": {"input": 5.0, "output": 25.0},
     "claude-opus-4-6": {"input": 5.0, "output": 25.0},
@@ -45,6 +53,7 @@ DEFAULT_PRICING = {
     "claude-sonnet-4-5": {"input": 3.0, "output": 15.0},
     "claude-sonnet-4": {"input": 3.0, "output": 15.0},
     "claude-haiku-4-5": {"input": 1.0, "output": 5.0},
+    "claude-3-5-haiku": {"input": 0.8, "output": 4.0},
 }
 CACHE_READ_MULT = 0.1
 CACHE_5M_MULT = 1.25
@@ -57,10 +66,15 @@ def user_pricing_path():
     return Path(base) / "token-usage" / "pricing.json"
 
 
+def _is_rate(x):
+    return isinstance(x, (int, float)) and not isinstance(x, bool)
+
+
 def _valid_rates(v):
+    """{"input": $/MTok, "output": $/MTok} plus an optional "cache_read" $/MTok."""
     return (isinstance(v, dict)
-            and isinstance(v.get("input"), (int, float)) and not isinstance(v.get("input"), bool)
-            and isinstance(v.get("output"), (int, float)) and not isinstance(v.get("output"), bool))
+            and _is_rate(v.get("input")) and _is_rate(v.get("output"))
+            and ("cache_read" not in v or _is_rate(v["cache_read"])))
 
 
 def load_pricing():
@@ -162,22 +176,27 @@ def cost_usd(by_model, pricing):
         total += (
             bucket["input"] * inp
             + bucket["output"] * out
-            + bucket["cache_read"] * inp * CACHE_READ_MULT
+            + bucket["cache_read"] * cache_read_rate(rates) / 1e6
             + bucket["cache_5m"] * inp * CACHE_5M_MULT
             + bucket["cache_1h"] * inp * CACHE_1H_MULT
         )
     return total if priced else None
 
 
+def cache_read_rate(rates):
+    """$/MTok for cache hits: the entry's own rate if given, else 0.1x input."""
+    return rates.get("cache_read", rates["input"] * CACHE_READ_MULT)
+
+
 def cache_savings_usd(by_model, pricing):
-    """USD saved by cache reads being billed at 0.1x instead of the full input rate."""
+    """USD saved by cache reads being billed at the cache-hit rate instead of full input."""
     total, priced = 0.0, False
     for model, bucket in by_model.items():
         rates = rates_for(model, pricing)
         if not rates:
             continue
         priced = True
-        total += bucket["cache_read"] * rates["input"] / 1e6 * (1 - CACHE_READ_MULT)
+        total += bucket["cache_read"] * (rates["input"] - cache_read_rate(rates)) / 1e6
     return total if priced else None
 
 
@@ -525,6 +544,13 @@ def render_report(data, show_agents=False, show_models=False):
     )
     models = ", ".join(sorted(t["models"]))
     lines.append("")
+    transcript_path = data.get("transcript_path")
+    if transcript_path:
+        # Resolution can fall back to a transcript in a project other than
+        # the caller's (see find_latest_transcript) — always name which one
+        # was actually measured, rather than leaving that silent.
+        tp = Path(transcript_path)
+        lines.append(f"Session: `{tp.parent.name}/{tp.name}`")
     savings = t.get("cache_savings_usd")
     if savings is not None and savings >= 0.01:
         lines.append(f"Prompt caching saved ~{fmt_cost(savings)} vs. full input rates.")
@@ -591,6 +617,13 @@ def index_dir():
                                Path.home() / ".cache" / "token-usage")) / "index"
 
 
+def pricing_fingerprint(pricing):
+    """Stable hash of a pricing table; cached summaries bake costs in, so a rate
+    change (bundled update or user overlay edit) must invalidate them."""
+    import hashlib
+    return hashlib.sha1(json.dumps(pricing, sort_keys=True).encode()).hexdigest()
+
+
 def summarize_transcript(path, pricing, st=None):
     # Stat BEFORE parsing: if the transcript is appended mid-parse, the recorded
     # mtime is then stale and the next run re-parses — never a silently stale cache.
@@ -606,6 +639,7 @@ def summarize_transcript(path, pricing, st=None):
     return {
         "version": INDEX_VERSION, "path": str(path),
         "mtime_ns": st.st_mtime_ns, "size": st.st_size,
+        "pricing": pricing_fingerprint(pricing),
         "project": path.parent.name,
         "first_ts": next((s["start_ts"] for s in segs if s["start_ts"]), None),
         "by_label": {label: {"usage": agg["usage"], "cost_usd": agg["cost_usd"],
@@ -628,7 +662,8 @@ def cached_summary(path, pricing):
         try:
             c = json.loads(cache_file.read_text())
             if (c.get("version") == INDEX_VERSION
-                    and c.get("mtime_ns") == st.st_mtime_ns and c.get("size") == st.st_size):
+                    and c.get("mtime_ns") == st.st_mtime_ns and c.get("size") == st.st_size
+                    and c.get("pricing") == pricing_fingerprint(pricing)):
                 return c, True
         except (json.JSONDecodeError, OSError):
             pass
@@ -673,6 +708,39 @@ def _local_day(ts):
         return ts[:10]
 
 
+def iter_summaries(pricing, cutoff=None, project=None, exclude=None, progress=False):
+    """Yield cached_summary() results for every transcript under projects_dir(),
+    applying the filters shared by every caller that scans the whole corpus:
+    an optional `cutoff` (skip sessions starting before it), an optional
+    `exclude` path (skip that one transcript — the session being analysed),
+    and an optional `project` substring filter (`project in s["project"]`).
+
+    compute_baseline needs *exact* project equality instead, so it deliberately
+    does not pass `project` here and filters the yielded summaries itself —
+    don't fold that exact-match rule into this generator.
+
+    `progress` prints run_history's stderr counter for freshly-parsed (not
+    cache-hit) transcripts; other callers leave it off.
+    """
+    parsed = 0
+    for f in sorted(projects_dir().glob("*/*.jsonl")):
+        try:
+            s, hit = cached_summary(f, pricing)
+        except OSError:
+            continue
+        if progress and not hit:
+            parsed += 1
+            if parsed % 25 == 0:
+                print(f"token-usage: parsed {parsed} transcripts…", file=sys.stderr)
+        if exclude and s["path"] == exclude:
+            continue
+        if cutoff and (s["first_ts"] or "") < cutoff:
+            continue
+        if project and project not in s["project"]:
+            continue
+        yield s
+
+
 def run_history(by="project", since=None, project=None):
     pricing = load_pricing()
     cutoff = since_cutoff(since)
@@ -688,21 +756,7 @@ def run_history(by="project", since=None, project=None):
             r["cost_usd"] = (r["cost_usd"] or 0.0) + cost
         r["calls"] += calls
 
-    parsed = 0
-    files = sorted(projects_dir().glob("*/*.jsonl"))
-    for f in files:
-        try:
-            s, hit = cached_summary(f, pricing)
-        except OSError:
-            continue
-        if not hit:
-            parsed += 1
-            if parsed % 25 == 0:
-                print(f"token-usage: parsed {parsed} transcripts…", file=sys.stderr)
-        if cutoff and (s["first_ts"] or "") < cutoff:
-            continue
-        if project and project not in s["project"]:
-            continue
+    for s in iter_summaries(pricing, cutoff=cutoff, project=project, progress=True):
         unpriced.update(unpriced_models(s.get("by_model", {}), pricing))
         if by == "project":
             add_row(s["project"], s["total"]["usage"], s["total"]["cost_usd"], 1)
@@ -751,6 +805,14 @@ def render_history_csv(data):
     return buf.getvalue()
 
 
+def _usage_cells(u, cost):
+    """The output/input/cache-read/cache-write/cost cells shared by every
+    history and top-consumers row (leading pipe included)."""
+    return (f"| {fmt_tokens(u['output'])} | {fmt_tokens(u['input'])} "
+            f"| {fmt_tokens(u['cache_read'])} | {fmt_tokens(u['cache_5m'] + u['cache_1h'])} "
+            f"| {fmt_cost(cost)} |")
+
+
 def render_history(data):
     head = {"project": "Project", "day": "Day",
             "command": "Command", "model": "Model"}[data["by"]]
@@ -762,9 +824,7 @@ def render_history(data):
     total_cost, calls = None, 0
     for r in data["rows"]:
         u = r["usage"]
-        lines.append(f"| {r['key']} | {r['calls']} | {fmt_tokens(u['output'])} | {fmt_tokens(u['input'])} "
-                     f"| {fmt_tokens(u['cache_read'])} | {fmt_tokens(u['cache_5m'] + u['cache_1h'])} "
-                     f"| {fmt_cost(r['cost_usd'])} |")
+        lines.append(f"| {r['key']} | {r['calls']} " + _usage_cells(u, r["cost_usd"]))
         for k in total:
             total[k] += u[k]
         if r["cost_usd"] is not None:
@@ -776,6 +836,61 @@ def render_history(data):
     burn = burn_rate_line(total_cost, data.get("since"))
     if burn:
         lines += ["", burn]
+    note = unpriced_footnote(data.get("unpriced_models") or [])
+    if note:
+        lines += ["", note]
+    return "\n".join(lines)
+
+
+def run_top_consumers(by="session", since="30d", project=None, limit=10):
+    """Costliest sessions (by="session") or command labels aggregated across
+    sessions (by="command") in a window. Unpriced rows sort last."""
+    pricing = load_pricing()
+    cutoff = since_cutoff(since)
+    unpriced = set()
+    sessions, commands = [], {}
+    for s in iter_summaries(pricing, cutoff=cutoff, project=project):
+        unpriced.update(unpriced_models(s.get("by_model", {}), pricing))
+        if by == "session":
+            sessions.append({"session_id": Path(s["path"]).stem, "path": s["path"],
+                             "project": s["project"], "first_ts": s["first_ts"],
+                             "usage": s["total"]["usage"],
+                             "cost_usd": s["total"]["cost_usd"]})
+            continue
+        for label, agg in s["by_label"].items():
+            c = commands.setdefault(label, {"label": label, "sessions": 0, "invocations": 0,
+                                            "usage": empty_usage(), "cost_usd": None})
+            c["sessions"] += 1
+            c["invocations"] += agg["invocations"]
+            for k in c["usage"]:
+                c["usage"][k] += agg["usage"].get(k, 0)
+            if agg["cost_usd"] is not None:
+                c["cost_usd"] = (c["cost_usd"] or 0.0) + agg["cost_usd"]
+    rows = sessions if by == "session" else list(commands.values())
+    key = "session_id" if by == "session" else "label"
+    rows.sort(key=lambda r: (r["cost_usd"] is None, -(r["cost_usd"] or 0.0), r[key]))
+    return {"by": by, "since": since, "project": project, "limit": limit,
+            "rows": rows[:limit], "unpriced_models": sorted(unpriced)}
+
+
+def render_top_consumers(data):
+    if not data["rows"]:
+        return "No sessions in window."
+    if data["by"] == "session":
+        lines = ["| Session | Project | Started | Output | Input | Cache read | Cache write | Est. cost |",
+                 "|---|---|---|---:|---:|---:|---:|---:|"]
+        for r in data["rows"]:
+            u = r["usage"]
+            lines.append(f"| {r['session_id']} | {r['project']} | {(r['first_ts'] or '')[:10]} "
+                         + _usage_cells(u, r["cost_usd"]))
+    else:
+        lines = ["| Command | Sessions | Calls | Output | Input | Cache read | Cache write | Est. cost |",
+                 "|---|---:|---:|---:|---:|---:|---:|---:|"]
+        for r in data["rows"]:
+            u = r["usage"]
+            name = r["label"] if r["label"] == OTHER_LABEL else f"`{r['label']}`"
+            lines.append(f"| {name} | {r['sessions']} | {r['invocations']} "
+                         + _usage_cells(u, r["cost_usd"]))
     note = unpriced_footnote(data.get("unpriced_models") or [])
     if note:
         lines += ["", note]
@@ -823,14 +938,8 @@ def compute_baseline(pricing, project, days=30, exclude=None):
     transcript at `exclude` (the session being analysed)."""
     cutoff = since_cutoff(f"{days}d")
     session_costs, commands = [], {}
-    for f in sorted(projects_dir().glob("*/*.jsonl")):
-        try:
-            s, _ = cached_summary(f, pricing)
-        except OSError:
-            continue
-        if exclude and s["path"] == exclude:
-            continue
-        if (s["first_ts"] or "") < cutoff or s["project"] != project:
+    for s in iter_summaries(pricing, cutoff=cutoff, exclude=exclude):
+        if s["project"] != project:
             continue
         if s["total"]["cost_usd"] is not None:
             session_costs.append(s["total"]["cost_usd"])
@@ -995,17 +1104,7 @@ def run_insights(transcript=None, since=None, project=None, budget=None):
     pricing = load_pricing()
     if since:
         cutoff = since_cutoff(since)
-        summaries = []
-        for f in sorted(projects_dir().glob("*/*.jsonl")):
-            try:
-                s, _ = cached_summary(f, pricing)
-            except OSError:
-                continue
-            if (s["first_ts"] or "") < cutoff:
-                continue
-            if project and project not in s["project"]:
-                continue
-            summaries.append(s)
+        summaries = list(iter_summaries(pricing, cutoff=cutoff, project=project))
         return {"mode": "window",
                 "findings": window_insights(summaries, cutoff, pricing),
                 "baseline": {"sessions": len(summaries), "since": since}}
@@ -1014,13 +1113,19 @@ def run_insights(transcript=None, since=None, project=None, budget=None):
     baseline = compute_baseline(pricing, project=t.parent.name, exclude=str(t))
     return {"mode": "session",
             "findings": session_insights(data, baseline, budget=budget),
-            "baseline": baseline}
+            "baseline": baseline,
+            "transcript_path": str(t)}
 
 
 def render_insights(result):
     if not result["findings"]:
         return "No notable findings."
-    return "\n".join(f"- [{f['severity']}] {f['message']}" for f in result["findings"])
+    lines = [f"- [{f['severity']}] {f['message']}" for f in result["findings"]]
+    transcript_path = result.get("transcript_path")
+    if transcript_path:
+        tp = Path(transcript_path)
+        lines.append(f"(session: {tp.parent.name}/{tp.name})")
+    return "\n".join(lines)
 
 
 def project_slug(path_str):
@@ -1029,38 +1134,89 @@ def project_slug(path_str):
     return re.sub(r"[^A-Za-z0-9]", "-", path_str)
 
 
-def find_latest_transcript():
-    # 1) Claude Code: ~/.claude/projects/<cwd-slug>/*.jsonl
-    project_dir = Path.home() / ".claude" / "projects" / project_slug(str(Path.cwd()))
-    if project_dir.is_dir():
-        files = sorted(project_dir.glob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
-        if files:
-            return files[0]
-    # 2) Cowork (Claude desktop app): the sandbox mounts the live session's
-    #    transcript read-only under <mount>/.claude/projects/<slug>/<session>.jsonl.
-    #    Only the current session's project is present, so take the newest .jsonl.
-    cowork_roots = [Path.home() / "mnt" / ".claude" / "projects"]
+def _newest(paths):
+    paths = list(paths)
+    return max(paths, key=lambda p: p.stat().st_mtime) if paths else None
+
+
+def _cowork_roots():
+    """Cowork sandbox mount roots that might hold the live session's
+    transcript, read-only, under <mount>/.claude/projects/<slug>/<id>.jsonl.
+    A separate function so tests can neutralise it without depending on
+    where this machine's real HOME or /sessions happen to point."""
+    roots = [Path.home() / "mnt" / ".claude" / "projects"]
     sessions = Path("/sessions")
     if sessions.is_dir():
-        cowork_roots.extend(sorted(sessions.glob("*/mnt/.claude/projects")))
-    for root in cowork_roots:
-        if not root.is_dir():
-            continue
-        files = sorted(root.glob("*/*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
-        if files:
-            return files[0]
-    return None
+        roots.extend(sorted(sessions.glob("*/mnt/.claude/projects")))
+    return roots
+
+
+def find_latest_transcript(project_dir=None):
+    """Newest transcript for a project, or None.
+
+    project_dir=None means "no project context to anchor on" (e.g. Claude
+    desktop, or the MCP server with no caller-supplied hint): try cwd's own
+    project directory, then the Cowork sandbox mounts (which hold exactly the
+    live session), then the newest transcript under any project at all.
+
+    An *explicit* project_dir only ever looks at that project's own
+    directory — if it has no transcripts, that's None, not a guess at some
+    other project's session."""
+    root = projects_dir()
+    explicit = project_dir is not None
+    target = Path(project_dir).expanduser().resolve() if explicit else Path.cwd()
+    # 1) Claude Code: <projects>/<slug>/*.jsonl
+    slug_dir = root / project_slug(str(target))
+    if slug_dir.is_dir():
+        f = _newest(slug_dir.glob("*.jsonl"))
+        if f:
+            return f
+    if explicit:
+        return None
+    # 2) Cowork (Claude desktop app).
+    for r in _cowork_roots():
+        if r.is_dir():
+            f = _newest(r.glob("*/*.jsonl"))
+            if f:
+                return f
+    # 3) No project context at all: newest transcript on the machine.
+    return _newest(root.glob("*/*.jsonl")) if root.is_dir() else None
+
+
+def locate_transcript(arg=None, session_id=None, project_dir=None):
+    """Transcript to analyse, or None. Explicit path (must exist) > session id
+    (searched across every project) > TOKEN_USAGE_TRANSCRIPT (must exist) >
+    newest for the project dir (see find_latest_transcript)."""
+    if arg:
+        p = Path(arg)
+        return p if p.is_file() else None
+    if session_id:
+        safe = re.sub(r"[^A-Za-z0-9_-]", "", str(session_id))
+        return _newest(projects_dir().glob(f"*/{safe}.jsonl")) if safe else None
+    env = os.environ.get("TOKEN_USAGE_TRANSCRIPT")
+    if env:
+        p = Path(env)
+        return p if p.is_file() else None
+    return find_latest_transcript(project_dir)
+
+
+def budget_from_env():
+    """Session budget from TOKEN_USAGE_BUDGET_USD, or None when unset/unparseable.
+    Shared by the CLI and the MCP server so both read the variable the same way."""
+    try:
+        return float(os.environ["TOKEN_USAGE_BUDGET_USD"])
+    except (KeyError, ValueError):
+        return None
 
 
 def resolve_transcript(arg):
+    t = locate_transcript(arg)
+    if t:
+        return t
     if arg:
-        return Path(arg)
-    env = os.environ.get("TOKEN_USAGE_TRANSCRIPT")
-    if env:
-        return Path(env)
-    latest = find_latest_transcript()
-    if latest:
-        return latest
+        # A path *was* passed, so "pass a path" is the wrong advice: the file
+        # is simply not there (typo, stale path, wrong machine).
+        sys.exit(f"token-usage: transcript not found: {arg}")
     sys.exit("token-usage: no transcript found — pass a path to a session .jsonl file")
 
 
@@ -1165,6 +1321,12 @@ def main():
     i.add_argument("--since", default=None)
     i.add_argument("--project", default=None)
     i.add_argument("--json", action="store_true", dest="as_json")
+    t = sub.add_parser("top_consumers")
+    t.add_argument("--by", choices=("session", "command"), default="session")
+    t.add_argument("--since", default="30d")
+    t.add_argument("--project", default=None)
+    t.add_argument("--limit", type=int, default=10)
+    t.add_argument("--json", action="store_true", dest="as_json")
     args = ap.parse_args()
 
     if args.cmd == "hook":
@@ -1183,14 +1345,17 @@ def main():
     if args.cmd == "insights":
         if args.transcript and args.since:
             sys.exit("token-usage: pass a transcript OR --since, not both")
-        budget = None
-        try:
-            budget = float(os.environ["TOKEN_USAGE_BUDGET_USD"])
-        except (KeyError, ValueError):
-            pass
+        budget = budget_from_env()
         result = run_insights(transcript=args.transcript, since=args.since,
                               project=args.project, budget=budget)
         print(json.dumps(result, indent=1) if args.as_json else render_insights(result))
+        return
+    if args.cmd == "top_consumers":
+        if args.limit < 1:
+            sys.exit("token-usage: --limit must be >= 1")
+        data = run_top_consumers(by=args.by, since=args.since,
+                                 project=args.project, limit=args.limit)
+        print(json.dumps(data, indent=1) if args.as_json else render_top_consumers(data))
         return
     if getattr(args, "diff", None):
         if getattr(args, "transcript", None):

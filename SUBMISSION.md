@@ -46,8 +46,9 @@ cross-session history by project, day, command, or model with a --project
 filter, CSV export, and a burn-rate footer; --diff compare mode for
 before/after prompt optimisation; a live per-session ledger maintained by
 Stop/SubagentStop hooks powering an optional statusline segment and opt-in
-budget nudges; and cache-aware per-model cost estimates (cache reads 0.1x,
-5-minute cache writes 1.25x, 1-hour writes 2x), clearly labelled as API-price
+budget nudges; and cache-aware per-model cost estimates (cache reads 0.1x —
+0.025x on Fable/Mythos 5.1 — 5-minute cache writes 1.25x, 1-hour writes 2x),
+clearly labelled as API-price
 estimates for subscription users. Python 3.9+ stdlib only — no dependencies,
 no network calls, no telemetry.
 ```
@@ -127,8 +128,9 @@ compares two transcripts per label for before/after prompt optimisation;
 and SubagentStop hooks maintain a live per-session ledger
 (`~/.cache/token-usage/`) powering instant reports, an optional statusline
 segment, and opt-in budget nudges that re-warn at each budget multiple.
-Cost estimates are per-model and cache-aware (cache reads 0.1x, 5-minute cache
-writes 1.25x, 1-hour writes 2x input rate), clearly labelled as API-price
+Cost estimates are per-model and cache-aware (cache reads 0.1x, or the model's
+own cache-hit rate where it differs, 5-minute cache writes 1.25x, 1-hour writes
+2x input rate), clearly labelled as API-price
 estimates for subscription users.
 
 ### Components

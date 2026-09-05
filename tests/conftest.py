@@ -9,13 +9,15 @@ SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "token_usage.py"
 
 # Loaded once at collection. Module-level constants (e.g. LEDGER_DIR) bind at import — in-process tests must monkeypatch module attributes, not env vars.
 _spec = importlib.util.spec_from_file_location("token_usage", SCRIPT)
-_tu = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(_tu)
+# Public so module-level test helpers (not just the `tu` fixture) can
+# monkeypatch the very same module object the MCP server imports.
+TOKEN_USAGE = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(TOKEN_USAGE)
 
 
 @pytest.fixture
 def tu():
-    return _tu
+    return TOKEN_USAGE
 
 
 @pytest.fixture(autouse=True)
@@ -53,3 +55,18 @@ def write_jsonl(path, entries):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(json.dumps(e) for e in entries) + "\n")
     return path
+
+
+SERVER = Path(__file__).resolve().parent.parent / "scripts" / "mcp_server.py"
+
+
+@pytest.fixture
+def mcp():
+    """The MCP server module, bound to the SAME token_usage instance as `tu`
+    so monkeypatching either side is visible to both."""
+    import sys
+    sys.modules.setdefault("token_usage", TOKEN_USAGE)
+    spec = importlib.util.spec_from_file_location("mcp_server", SERVER)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod

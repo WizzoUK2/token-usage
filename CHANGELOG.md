@@ -6,6 +6,70 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-09-04
+
+### Added
+
+- **MCP server** — `scripts/mcp_server.py`, a stdlib stdio JSON-RPC 2.0 server
+  registered by the plugin's new `.mcp.json` (Claude Code auto-starts it; Claude
+  desktop can register the same script). Tools: `session_cost`, `history`,
+  `insights`, `diff`, `top_consumers`; `format: json|markdown`; tool failures
+  are `isError` results, protocol problems are JSON-RPC errors; nothing but
+  JSON-RPC reaches stdout. Current session resolves from
+  `TOKEN_USAGE_PROJECT_DIR` (`${CLAUDE_PROJECT_DIR}`), then the Cowork mount,
+  then the newest transcript anywhere.
+- **`top_consumers` subcommand** — costliest sessions (`--by session`) or
+  command labels aggregated across sessions (`--by command`) in a window;
+  `--since`, `--project`, `--limit`, `--json`. Unpriced rows sort last.
+- **Session-id lookup** — `locate_transcript()` resolves a Claude Code session
+  id across every project; `resolve_transcript()` now fails cleanly on a
+  non-existent explicit path (`transcript not found: <path>`) instead of
+  crashing in the parser.
+- **Pricing:** `claude-fable-5-1`, `claude-mythos-5-1` ($10/$50, cache hits
+  $0.25/MTok) and `claude-opus-5` ($5/$25) in the bundled table. Fable 5.1
+  usage previously fell through the prefix matcher to the `claude-fable-5`
+  entry — right per-token rates, but cache reads overstated 4×. Legacy
+  `claude-3-5-haiku` ($0.80/$4) added so old transcripts price too.
+- **Per-model cache-hit rate** — pricing entries (bundled or user overlay)
+  accept an optional `"cache_read"` ($/MTok). When present it replaces the
+  0.1× input multiplier for that model in both cost and cache-savings
+  figures; entries without it behave exactly as before. A non-numeric
+  `cache_read` invalidates the entry (warned, skipped), like `input`/`output`.
+
+### Changed
+
+- **Transcript auto-discovery falls back further when there's no project
+  context.** `report`, `json`, and `insights` used to return "no transcript
+  found" when the cwd had no Claude Code project directory and no Cowork
+  mount existed. They (and `find_latest_transcript()`, which the MCP server's
+  "current session" resolution also uses) now fall back one step further to
+  the newest transcript under *any* project on the machine. This is
+  necessary for Claude desktop and MCP callers with no project context to
+  anchor on, but it also means running these commands from a directory with
+  no Claude Code history of its own can silently analyse a different
+  project's most recent session instead of failing — pass an explicit
+  transcript path or session id when that matters.
+- **`report` and `insights` now name the transcript they measured.** The
+  markdown `report` ends with a `Session: <project-slug>/<session>.jsonl`
+  line, `insights` text output appends `(session: <project-slug>/<session>.jsonl)`,
+  and `insights --json` gains `transcript_path` in session mode. Auto-discovery
+  can land on a session in a different project (see the fallback change
+  above), so which one was analysed is no longer left implicit. Scripts
+  parsing the text output should expect the extra trailing line.
+- **Sonnet 5 priced at $2/$10** (was $3/$15). Anthropic made the launch
+  price permanent in September 2026 instead of raising it, so the "promo not
+  modelled" caveat is gone. Sonnet 5 session costs drop by a third vs 0.5.0.
+
+### Fixed
+
+- **History index no longer serves stale costs after a pricing change.**
+  Cached per-transcript summaries bake `cost_usd` in but were re-validated
+  only by (mtime, size), so `history --by project|day|command` and the
+  `insights` 30-day baseline kept pricing old rates until a transcript
+  changed. Entries now also carry a fingerprint of the effective pricing
+  table (bundled + overlay) and re-parse when it differs. Expect a one-off
+  full re-scan on first run after upgrading.
+
 ## [0.5.0] — 2026-07-09
 
 ### Added
@@ -161,7 +225,8 @@ Initial release.
 - Standalone CLI: `python3 scripts/token_usage.py report|json [transcript]`.
 - Optional statusline example (`examples/statusline.sh`, requires `jq`).
 
-[Unreleased]: https://github.com/WizzoUK2/token-usage/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/WizzoUK2/token-usage/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/WizzoUK2/token-usage/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/WizzoUK2/token-usage/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/WizzoUK2/token-usage/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/WizzoUK2/token-usage/compare/v0.2.0...v0.3.0

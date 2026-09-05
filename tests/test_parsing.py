@@ -61,9 +61,23 @@ def test_rates_for_provider_prefixed_ids(tu):
 
 def test_bundled_pricing_covers_current_models(tu):
     pricing = tu.load_pricing()
-    assert tu.rates_for("claude-sonnet-5", pricing) == {"input": 3.0, "output": 15.0}
-    assert tu.rates_for("claude-sonnet-5-20260601", pricing) == {"input": 3.0, "output": 15.0}
+    # Sonnet 5's $2/$10 launch price became the standard price (Sept 2026).
+    assert tu.rates_for("claude-sonnet-5", pricing) == {"input": 2.0, "output": 10.0}
+    assert tu.rates_for("claude-sonnet-5-20260601", pricing) == {"input": 2.0, "output": 10.0}
     assert tu.rates_for("claude-mythos-5", pricing) == {"input": 10.0, "output": 50.0}
+    assert tu.rates_for("claude-opus-5", pricing) == {"input": 5.0, "output": 25.0}
+    assert tu.rates_for("claude-opus-5-20260724", pricing) == {"input": 5.0, "output": 25.0}
+    assert tu.rates_for("claude-3-5-haiku-20241022", pricing) == {"input": 0.8, "output": 4.0}
+
+
+def test_fable_5_1_has_its_own_cache_read_rate(tu):
+    # Fable 5.1 / Mythos 5.1 bill cache hits at $0.25/MTok (0.025x), not the
+    # usual 0.1x — so they must not fall through to the "claude-fable-5" key.
+    pricing = tu.load_pricing()
+    for model in ("claude-fable-5-1", "claude-fable-5-1-20260901", "claude-mythos-5-1"):
+        assert tu.rates_for(model, pricing) == {"input": 10.0, "output": 50.0,
+                                                "cache_read": 0.25}, model
+    assert "cache_read" not in tu.rates_for("claude-fable-5", pricing)
 
 
 def test_rates_for_prefix_stops_at_segment_boundary(tu):
@@ -85,6 +99,17 @@ def test_cost_and_cache_savings_math(tu):
     assert tu.cost_usd(by_model, pricing) == 93.5
     # savings: 1MTok read at 0.9 * input rate = 9.0
     assert tu.cache_savings_usd(by_model, pricing) == 9.0
+
+
+def test_cost_uses_per_model_cache_read_rate_when_given(tu):
+    pricing = {"m": {"input": 10.0, "output": 50.0, "cache_read": 0.25}}
+    by_model = {"m": {"input": 1_000_000, "output": 1_000_000,
+                      "cache_read": 1_000_000, "cache_5m": 1_000_000,
+                      "cache_1h": 1_000_000, "requests": 1}}
+    # 10 + 50 + 0.25 + 10*1.25 + 10*2.0 = 92.75
+    assert tu.cost_usd(by_model, pricing) == 92.75
+    # savings: 1MTok read at (10 - 0.25) = 9.75
+    assert tu.cache_savings_usd(by_model, pricing) == 9.75
 
 
 def test_project_slug_replaces_all_non_alphanumerics(tu):
