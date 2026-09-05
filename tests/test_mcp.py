@@ -295,3 +295,85 @@ def test_top_consumers_tool(mcp, tmp_path, monkeypatch):
     assert not err and md.startswith("| Command | Sessions |")
     text, err = call(mcp, "top_consumers", limit=0)
     assert err and "limit" in text
+
+
+def test_history_default_by_is_project(mcp, tmp_path, monkeypatch):
+    # No `by` passed -> spec default is "project", not "day" or anything else.
+    seed(tmp_path, monkeypatch)
+    data = json.loads(call(mcp, "history", since="2026-01-01")[0])
+    assert data["by"] == "project"
+    assert {r["key"] for r in data["rows"]} == {"-Users-x-alpha", "-Users-x-beta"}
+
+
+def test_history_project_filter_is_passed_through(mcp, tmp_path, monkeypatch):
+    seed(tmp_path, monkeypatch)
+    data = json.loads(call(mcp, "history", since="2026-01-01", project="alpha")[0])
+    assert data["project"] == "alpha"
+    assert [r["key"] for r in data["rows"]] == ["-Users-x-alpha"]
+
+
+def test_insights_window_mode_project_filter_is_passed_through(mcp, tmp_path, monkeypatch):
+    seed(tmp_path, monkeypatch)
+    data = json.loads(call(mcp, "insights", since="2026-01-01", project="alpha")[0])
+    assert data["mode"] == "window" and data["baseline"]["sessions"] == 1
+
+
+def test_top_consumers_project_filter_is_passed_through(mcp, tmp_path, monkeypatch):
+    seed(tmp_path, monkeypatch)
+    data = json.loads(call(mcp, "top_consumers", since="2026-01-01", project="beta")[0])
+    assert data["project"] == "beta"
+    assert [r["session_id"] for r in data["rows"]] == ["bbb-222"]
+
+
+def test_top_consumers_default_since_is_30d(mcp, tmp_path, monkeypatch):
+    # Seeded sessions are dated 2026-06 which, relative to the real clock this
+    # suite runs under, is well outside a genuine rolling 30-day window. If the
+    # default silently regressed to None (no filtering) these rows would show
+    # up instead of being filtered out.
+    seed(tmp_path, monkeypatch)
+    data = json.loads(call(mcp, "top_consumers")[0])
+    assert data["since"] == "30d"
+    assert data["rows"] == []
+
+
+def test_top_consumers_default_limit_is_10(mcp, tmp_path, monkeypatch):
+    proj, s1, s2 = seed(tmp_path, monkeypatch)
+    # Two more sessions so a limit=10 default is distinguishable from a
+    # regression to some smaller number (e.g. 3) -- with only 2 rows both
+    # limits would look identical.
+    s3 = write_jsonl(proj / "-Users-x-gamma" / "ccc-333.jsonl", [
+        user("2026-06-13T10:00:00Z", command="/review"),
+        assistant("2026-06-13T10:00:01Z", usage(out=5_000), request_id="r4"),
+    ])
+    s4 = write_jsonl(proj / "-Users-x-delta" / "ddd-444.jsonl", [
+        user("2026-06-14T10:00:00Z", command="/review"),
+        assistant("2026-06-14T10:00:01Z", usage(out=5_000), request_id="r5"),
+    ])
+    os.utime(s3, (1_700_000_200, 1_700_000_200))
+    os.utime(s4, (1_700_000_300, 1_700_000_300))
+    data = json.loads(call(mcp, "top_consumers", since="2026-01-01")[0])
+    assert data["limit"] == 10
+    assert len(data["rows"]) == 4
+
+
+def test_insights_session_mode_budget_usd_is_passed_through(mcp, tu, tmp_path, monkeypatch):
+    proj, s1, s2 = seed(tmp_path, monkeypatch)
+    monkeypatch.delenv("TOKEN_USAGE_BUDGET_USD", raising=False)
+    baseline_cost = tu.aggregate(tu.parse_session(s2), tu.load_pricing())["total"]["cost_usd"]
+    # A budget that puts this session's cost at 80% of budget -- inside the
+    # [0.75, 1.0) "budget-pace" window -- so the finding only appears when
+    # budget_usd actually reaches run_insights/session_insights.
+    budget = baseline_cost / 0.8
+    data = json.loads(call(mcp, "insights", session_id="bbb-222", budget_usd=budget)[0])
+    assert any(f["rule"] == "budget-pace" for f in data["findings"])
+    data_no_budget = json.loads(call(mcp, "insights", session_id="bbb-222")[0])
+    assert not any(f["rule"] == "budget-pace" for f in data_no_budget["findings"])
+
+
+def test_insights_session_mode_falls_back_to_budget_env_var(mcp, tu, tmp_path, monkeypatch):
+    proj, s1, s2 = seed(tmp_path, monkeypatch)
+    baseline_cost = tu.aggregate(tu.parse_session(s2), tu.load_pricing())["total"]["cost_usd"]
+    budget = baseline_cost / 0.8
+    monkeypatch.setenv("TOKEN_USAGE_BUDGET_USD", str(budget))
+    data = json.loads(call(mcp, "insights", session_id="bbb-222")[0])
+    assert any(f["rule"] == "budget-pace" for f in data["findings"])
