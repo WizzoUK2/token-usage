@@ -35,8 +35,15 @@ python3 scripts/token_usage.py json  path/to/session.jsonl
 
 ## Testing a change
 
-There is no formal test suite yet (contributions welcome — pytest, stdlib
-fixtures only). Until then, verify against real transcripts:
+Run the suite on both supported interpreters, with warnings as errors — this
+is exactly what CI gates on:
+
+```bash
+python3 -m pytest tests/ -q -W error       # stdlib fixtures only, no network
+python3 -m ruff check scripts tests
+```
+
+Then verify against real transcripts:
 
 1. Run `report` against a few of your own transcripts in
    `~/.claude/projects/<project-slug>/`, including at least one session that

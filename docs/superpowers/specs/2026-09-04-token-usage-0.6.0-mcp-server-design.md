@@ -100,8 +100,23 @@ For Claude desktop / Cowork the README documents the equivalent entry for
 ## 2. Tools
 
 All tools accept `format`: `"json"` (default) or `"markdown"`. JSON results
-are the CLI's existing structures; markdown results are the CLI's rendered
-text. Unknown argument keys are rejected.
+are the CLI's existing structures **plus the MCP-only disclosure keys**;
+markdown results are the CLI's rendered text, with each disclosure as its own
+footnote block. Unknown argument keys are rejected; `arguments` that is
+present but not an object is a `-32602` protocol error (only a missing or
+null `arguments` means "no arguments").
+
+Every result carries:
+
+| Key | Meaning |
+|---|---|
+| `warnings` | Non-fatal problems that changed the numbers (malformed pricing overlay or entry, an unwritable summary cache, a bad `TOKEN_USAGE_BUDGET_USD`, a missing projects root). Markdown: one `Warning: <text>` block each. |
+| `skipped_transcripts` | Paths the corpus scan could not read (corpus-scanning tools and both `insights` modes). Markdown: a `N transcript(s) skipped (unreadable): …` footnote. |
+| `projects_dir_missing` | The projects root when it is not a directory at all, else `null` — an empty table is otherwise indistinguishable from "you spent nothing". Markdown: `No Claude Code projects directory at <path> — nothing was scanned.` |
+
+`session_cost` and `insights` (session mode) additionally carry `transcript`
+(the path analysed) and `resolved_via` (the resolution rung), and their
+markdown notes when the session was merely the newest one found.
 
 ### `session_cost`
 
@@ -115,7 +130,8 @@ Per-activity breakdown of one session.
 | `models` | boolean | Per-model ↳ rows (markdown) / always present in JSON. |
 | `format` | enum | |
 
-JSON: the `aggregate()` output plus `"transcript": "<path analysed>"`.
+JSON: the `aggregate()` output plus `"transcript": "<path analysed>"`,
+`"resolved_via"` and `"warnings"`.
 
 ### `history`
 
@@ -126,7 +142,9 @@ JSON: the `aggregate()` output plus `"transcript": "<path analysed>"`.
 | `project` | string | substring filter |
 | `format` | enum | |
 
-JSON: `run_history()` output. Markdown: `render_history()`.
+JSON: `run_history()` output (`rows`, `unpriced_models`,
+`skipped_transcripts`, `projects_dir_missing`) plus `warnings`.
+Markdown: `render_history()`.
 
 ### `insights`
 
@@ -137,7 +155,11 @@ JSON: `run_history()` output. Markdown: `render_history()`.
 | `budget_usd` | number | overrides `TOKEN_USAGE_BUDGET_USD` for this call |
 | `format` | enum | |
 
-JSON: `run_insights()` output plus `"transcript"` in session mode.
+JSON: `run_insights()` output (`mode`, `findings`, `baseline`,
+`skipped_transcripts`, `projects_dir_missing`; window mode's `baseline` adds
+`first_half_sessions`, `first_half_cost` and `first_half_spend` — the
+unrounded predicate the trend rules and the caveat share) plus `warnings`,
+and `"transcript"` / `"resolved_via"` in session mode.
 Markdown: `render_insights()`.
 
 ### `diff`
@@ -147,7 +169,7 @@ Markdown: `render_insights()`.
 | `old`, `new` | string, required | each a transcript path or session id |
 | `format` | enum | |
 
-JSON: `diff_data()` output. Markdown: `render_diff()`.
+JSON: `diff_data()` output plus `warnings`. Markdown: `render_diff()`.
 
 ### `top_consumers`
 
@@ -167,15 +189,25 @@ Implementation in the analyser: iterate `cached_summary()` over the
 projects dir (same loop and filters as `run_history`).
 
 - `by: session` — one row per transcript: `path`, `session_id` (file
-  stem), `project`, `first_ts`, `usage`, `cost_usd`. Sorted by cost desc
-  (unpriced → treated as 0 and listed last), truncated to `limit`.
+  stem), `project`, `first_ts`, `usage`, `cost_usd`, `partial`. Sorted by
+  cost desc (unpriced → treated as 0 and listed last), truncated to `limit`.
 - `by: command` — one row per label aggregated across sessions: `label`,
   `sessions` (count of transcripts containing it), `invocations`, `usage`,
-  `cost_usd`. Same sort and truncation.
+  `cost_usd`, `partial`. Same sort and truncation.
 
-JSON: `{"by", "since", "project", "limit", "rows": [...], "unpriced_models": [...]}`.
+`partial` is true when any of the row's usage ran on an unpriced model, so
+`cost_usd` is only a priced subtotal — including a single session that mixed
+a priced and an unpriced model, where the cost is a number and hides the gap.
+Rows are ranked on that number, so markdown marks such a cost cell with a
+trailing `*` and footnotes the count (rows with no cost at all already show
+`—` and are not counted).
+
+JSON: `{"by", "since", "project", "limit", "rows": [...], "unpriced_models": [...],
+"unpriced_rows"` (session mode)`, "skipped_transcripts", "projects_dir_missing",
+"warnings"}`.
 Markdown: a table with the same columns as `history` plus a leading
-Session/Command column; unpriced footnote as elsewhere.
+Session/Command column; unpriced, partial, skipped and missing-root footnotes
+as elsewhere.
 
 ### Session resolution
 

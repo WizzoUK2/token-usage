@@ -471,8 +471,11 @@ def test_window_shorter_than_history_discloses_the_empty_first_half(tu, monkeypa
     assert r["baseline"]["first_half_sessions"] == 0
     assert r["baseline"]["first_half_cost"] == 0.0
     assert r["findings"] == []
+    assert r["baseline"]["first_half_spend"] is False
+    # first_half_sessions == 0 is the sharper of the two silences: there was
+    # nothing in the first half to compare, not sessions that spent nothing.
     assert tu.render_insights(r) == (
-        "No notable findings. (baseline: no spend in the window's first half; "
+        "No notable findings. (baseline: no sessions in the window's first half; "
         "the trend rules need both halves)")
 
 
@@ -488,3 +491,77 @@ def test_window_with_both_halves_populated_is_not_qualified(tu, monkeypatch, tmp
     assert r["baseline"]["first_half_sessions"] == 2
     assert r["baseline"]["first_half_cost"] > 0
     assert "baseline:" not in tu.render_insights(r)
+
+
+def _at(days_ago):
+    from datetime import datetime, timedelta, timezone
+    return (datetime.now(timezone.utc)
+            - timedelta(days=days_ago)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def test_window_caveat_never_contradicts_the_rules_that_ran(tu, tmp_path, monkeypatch):
+    # run_insights stored round(half_cost(first), 6) while window_insights
+    # gated rules 7-8 on the unrounded value, so a first half holding under
+    # ~$5e-7 (a few cache-read tokens) printed a spend-trend finding directly
+    # above "(baseline: no spend in the window's first half)".
+    proj = tmp_path / "projects"
+    early, late = _at(20), _at(1)
+    write_jsonl(proj / "p" / "s0.jsonl", [
+        user(early, command="/go"),
+        assistant(early, usage(cache_read=1), model="claude-fable-5-1", request_id="r1"),
+    ])
+    write_jsonl(proj / "p" / "s1.jsonl", [
+        user(late, command="/go"),
+        assistant(late, usage(out=120_000), model="claude-fable-5-1", request_id="r2"),
+    ])
+    monkeypatch.setenv("TOKEN_USAGE_PROJECTS_DIR", str(proj))
+    monkeypatch.setenv("TOKEN_USAGE_LEDGER_DIR", str(tmp_path / "cache"))
+    r = tu.run_insights(since="30d")
+    assert r["baseline"]["first_half_cost"] == 0.0        # 1 cache-read token, 6dp
+    assert r["baseline"]["first_half_spend"] is True      # ...but the rules ran on it
+    assert [f["rule"] for f in r["findings"] if f["rule"] == "spend-trend"] == ["spend-trend"]
+    assert "no spend in the window's first half" not in tu.render_insights(r)
+
+
+def test_window_is_split_once(tu, tmp_path, monkeypatch):
+    # run_insights and window_insights each called window_halves with their
+    # own datetime.now(), so the two midpoints could differ by a second and
+    # the disclosure could describe a different split from the rules'.
+    proj = tmp_path / "projects"
+    write_jsonl(proj / "p" / "s0.jsonl", [
+        user(_at(1), command="/go"),
+        assistant(_at(1), usage(out=1000), request_id="r1"),
+    ])
+    monkeypatch.setenv("TOKEN_USAGE_PROJECTS_DIR", str(proj))
+    monkeypatch.setenv("TOKEN_USAGE_LEDGER_DIR", str(tmp_path / "cache"))
+    calls = []
+    real = tu.window_halves
+
+    def counting(*a, **kw):
+        calls.append(kw.get("now"))
+        return real(*a, **kw)
+
+    monkeypatch.setattr(tu, "window_halves", counting)
+    tu.run_insights(since="30d")
+    assert len(calls) == 1
+
+
+def test_window_caveat_distinguishes_no_sessions_from_no_spend(tu):
+    # The caveat keys off the same predicate the rules use (first_half_spend),
+    # not a rounded cost, and first_half_sessions tells the reader which of
+    # the two silences they are looking at.
+    def caveat(**baseline):
+        return tu.insights_caveat({"mode": "window", "findings": [],
+                                   "baseline": dict({"sessions": 6, "since": "30d"},
+                                                    **baseline)})
+    assert caveat(first_half_cost=0.0, first_half_spend=True) == ""
+    assert caveat(first_half_cost=0.0, first_half_spend=False, first_half_sessions=0) == (
+        "(baseline: no sessions in the window's first half; "
+        "the trend rules need both halves)")
+    assert caveat(first_half_cost=0.0, first_half_spend=False, first_half_sessions=2) == (
+        "(baseline: no spend in the window's first half; "
+        "the trend rules need both halves)")
+    # A result that predates first_half_spend still gets the old reading.
+    assert caveat(first_half_cost=0.0) == ("(baseline: no spend in the window's first half; "
+                                           "the trend rules need both halves)")
+    assert caveat(first_half_cost=1.5) == ""

@@ -161,6 +161,83 @@ adheres to [Semantic Versioning](https://semver.org/).
   full re-scan on first run after upgrading — `INDEX_VERSION` is also 3→4 in
   this release, so per-label entries can record whether any of their usage was
   unpriced.
+- **The Stop hook survives any bytes at all on stdin.** `json.load(sys.stdin)`
+  decodes before it parses, so a non-UTF-8 byte raised `UnicodeDecodeError` —
+  a `ValueError`, but not a `json.JSONDecodeError` — straight past the guard:
+  exit 1 with a traceback on every Stop/SubagentStop, and the ledger plus
+  budget nudge silently dead for the rest of the session. The payload is now
+  read as bytes and decoded as UTF-8 (which is what JSON is) with
+  `errors="replace"`, whatever the locale says, so a POSIX-locale
+  launchd/cron/container run also stops dying on an accented transcript path;
+  and the whole hook body — diagnostics included — is wrapped so no exception
+  class can escape. The nudge is computed before the ledger is written and is
+  now emitted even when that write fails.
+- **A few undecodable bytes in a transcript no longer traceback.**
+  Transcripts, cache entries, ledgers, pricing layers and the plugin manifest
+  are read as UTF-8 with `errors="replace"`, so `report`, `json`, `insights`,
+  the hook and the corpus scan all survive a corrupt line instead of exiting
+  1 on it. The MCP server reads its stdin the same way: one 0xff byte used to
+  kill the process with rc=1 and *zero* replies, losing valid requests queued
+  ahead of it, where it is now an ordinary `-32700` parse error.
+- **A missing projects directory is disclosed, not answered with zeros.**
+  `Path.glob()` on a non-existent path — or on a regular file — yields
+  nothing rather than raising, so a mistyped `TOKEN_USAGE_PROJECTS_DIR`, an
+  MCP server started with a different `HOME` or an unmounted sandbox answered
+  "what did I spend this week" with a clean, successful, empty table. Every
+  corpus-scanning entry point (`history`, `top_consumers`, window `insights`,
+  the `insights` baseline) now reports `projects_dir_missing` in `--json`,
+  footnotes `No Claude Code projects directory at <path> — nothing was
+  scanned.` in markdown, warns on stderr and passes it to MCP `warnings`.
+- **A calendar-invalid `--since` is rejected instead of crashing.**
+  `--since 2026-09-31` (September has 30 days; likewise `2026-02-30`,
+  `2025-02-29`, `2026-13-45`, `2026-09-01 lunchtime`) passed the shape check
+  and then died inside `insights` window mode with a raw
+  `ValueError: day is out of range for month`, while `history` took the same
+  value and silently matched nothing. Both now say
+  `invalid --since value '…' — use Nd (e.g. 7d) or YYYY-MM-DD` (`invalid
+  since value …` over MCP).
+- **Pricing rates must be finite and non-negative.** `json.loads` accepts the
+  bare `NaN`/`Infinity` literals (and `1e400` overflows to `inf`), so a user
+  overlay carrying one produced a `"cost_usd": NaN` in the MCP JSON payload —
+  not RFC-8259 JSON, unparseable by a strict client — and in the Stop-hook
+  ledger, and made the hook's `int(cost // limit)` raise on every Stop, which
+  killed the budget nudge behind a single stderr line. Such entries are now
+  warned about and skipped like any other invalid rate; `0` remains legal for
+  free tiers.
+- **`TOKEN_USAGE_BUDGET_USD=0` (or negative, or `nan`) says so.** It parsed
+  fine and then silently switched off both the hook's nudge and the
+  `insights` budget-pace rule, leaving the user believing budget monitoring
+  was armed. It is now reported —
+  `ignoring TOKEN_USAGE_BUDGET_USD='0' — must be > 0` — like a non-numeric
+  typo, on stderr and in MCP `warnings`.
+- **The unwritable-cache warning reaches MCP callers.** It was stderr-only
+  and once per process, so a long-lived server re-parsed the whole corpus on
+  every query in silence. It now travels in `warnings` for every call while
+  staying once-per-process on stderr.
+- **MCP rejects `NaN`/`Infinity` numbers and a non-object `arguments`.**
+  `NaN` compares False against every bound, so `{"budget_usd": NaN}` ran the
+  tool with the budget rule silently disabled; and `arguments` of `[]`, `0`,
+  `""` or `false` was coerced to `{}`, answering about a session discovery
+  guessed at instead of reporting the malformed call (now `-32602`; a missing
+  or null `arguments` still means "no arguments").
+- **The window caveat can no longer contradict the findings above it.**
+  `insights --since` rounded the first half's cost to 6dp for the payload but
+  the trend rules ran on the unrounded value, so a first half holding under
+  ~$5e-7 (a few cache-read tokens) printed a spend-trend finding directly
+  above "(baseline: no spend in the window's first half)". The window is now
+  split once and shared with the rules, `--json` carries
+  `baseline.first_half_spend` (the rules' own predicate) and the qualifier
+  keys off it — and distinguishes `no sessions in the window's first half`
+  from `no spend`, which the old wording could not.
+- **`top_consumers` marks the rows its footnote is about.** A session or
+  command whose cost is only a priced subtotal now renders `$2.00*` and is
+  counted in `N session(s)/command(s) partially priced (marked *)`; session
+  rows gained the `partial` flag command rows already had, and the count no
+  longer includes rows that are wholly unpriced and already show `—`. A
+  session mixing a priced and an unpriced model used to rank above an honest
+  row with twice the tokens and the same figure, with nothing to show for it.
+- **CI runs the suite the way the contributor guide does** — `-W error` on
+  both interpreters, with `ruff` pinned to the version used locally.
 
 ## [0.5.0] — 2026-07-09
 

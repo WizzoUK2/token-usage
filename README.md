@@ -42,7 +42,9 @@ Claude Code tells you session totals (`/cost`, OTel metrics) and tools like ccus
   Claude Code starts it automatically with the plugin; Claude desktop can register the
   same script. JSON by default, `format: "markdown"` for the rendered tables.
 - **Top consumers** — `top_consumers --by session|command` lists the costliest sessions
-  or command labels in a window, the question `history` could not answer directly.
+  or command labels in a window, the question `history` could not answer directly. A row
+  whose cost is only a priced subtotal (some of its usage ran on an unpriced model) is
+  marked `*` and footnoted, since the rows are ranked on that number.
 
 ## Installation
 
@@ -123,7 +125,8 @@ With no argument, `report` and `json` pick the most recent session for the curre
 
 ### Budget nudges
 
-Set `TOKEN_USAGE_BUDGET_USD` in the environment Claude Code runs hooks with (e.g. the `env` block of `~/.claude/settings.json`):
+Set `TOKEN_USAGE_BUDGET_USD` (a number greater than zero — anything else is ignored
+with a warning on stderr) in the environment Claude Code runs hooks with (e.g. the `env` block of `~/.claude/settings.json`):
 
 ```json
 {
@@ -156,6 +159,9 @@ Every tool takes `format`: `json` (default — the CLI's JSON shapes plus `trans
 `resolved_via` and `warnings`) or `markdown` (the rendered table, with the same warnings
 as `Warning:` footnotes). Failures come back as tool results with `isError`, never as
 protocol errors, so a missing transcript or a bad `since` is a readable message.
+Malformed *calls* are the exception: an unknown method, or `arguments` that is present
+but not an object, is a JSON-RPC error (`-32602`) rather than an answer about a session
+the server guessed at.
 
 **"Current session"** resolves in this order: explicit `transcript` path → `session_id`
 (searched across every project) → `TOKEN_USAGE_TRANSCRIPT` → auto-discovery. What
@@ -215,7 +221,9 @@ Session mode (`insights [transcript]`) checks: cost outlier vs the 30-day projec
 
 Window mode (`insights --since 7d|30d|DATE [--project SUB]`) checks: spend trend between the first and second half of the window (warn ≥+50%, info ≥±25%), the top mover behind an increase (≥30% of it), and unpriced models anywhere in the window.
 
-No findings is a normal, healthy result — the tool prints `No notable findings.` rather than manufacturing something to say. It also says when it *couldn't* fully look: a window that matched no sessions prints `No sessions in window — nothing was scanned.`, and a trailing `(baseline: …)` names rules that were switched off — `(baseline: N prior session(s); the comparison rules need 5)` in session mode when the project has fewer than the five prior sessions rules 1–2 need, `(baseline: no spend in the window's first half; the trend rules need both halves)` in window mode when every matched session lands after the window's midpoint. That qualifier is appended whether or not anything fired: several rules need no baseline, so findings are no evidence the rest ran. `--json` returns the same findings as structured data for scripting, with the counts behind the qualifier under `baseline` (`sessions`, and in window mode `first_half_sessions` / `first_half_cost`).
+No findings is a normal, healthy result — the tool prints `No notable findings.` rather than manufacturing something to say. It also says when it *couldn't* fully look: a window that matched no sessions prints `No sessions in window — nothing was scanned.`, and a trailing `(baseline: …)` names rules that were switched off — `(baseline: N prior session(s); the comparison rules need 5)` in session mode when the project has fewer than the five prior sessions rules 1–2 need, and in window mode `(baseline: no sessions in the window's first half; the trend rules need both halves)` when every matched session lands after the window's midpoint, or `(baseline: no spend in the window's first half; …)` when the first half held sessions but no spend. That qualifier is appended whether or not anything fired: several rules need no baseline, so findings are no evidence the rest ran. `--json` returns the same findings as structured data for scripting, with the counts behind the qualifier under `baseline` (`sessions`, and in window mode `first_half_sessions` / `first_half_cost` / `first_half_spend` — the last being the rules' own unrounded predicate).
+
+Every command that scans the corpus (`history`, `top_consumers`, window `insights`, and the `insights` baseline) also says when it had nothing to scan: a `TOKEN_USAGE_PROJECTS_DIR` that is missing or is not a directory is reported as `projects_dir_missing` in `--json` and footnoted `No Claude Code projects directory at <path> — nothing was scanned.`, instead of a confident empty table.
 
 ## How it works
 

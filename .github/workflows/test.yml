@@ -14,6 +14,8 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
-      - run: pip install pytest ruff
-      - run: python3 -m pytest tests/ -v
+      - run: pip install pytest 'ruff==0.16.6'
+      # -W error: a warning the suite provokes is a failure, on both
+      # interpreters — the same gate the contributor guide sets locally.
+      - run: python3 -m pytest tests/ -v -W error
       - run: ruff check scripts tests

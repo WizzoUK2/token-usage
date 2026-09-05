@@ -127,7 +127,11 @@ def test_command_mode_flags_partially_priced_labels(tu, tmp_path, monkeypatch):
     assert rows["/review"]["cost_usd"] == 7.0        # 140k out @ $50/MTok, priced only
     assert rows["/commit"]["partial"] is False
     out = tu.render_top_consumers(data)
-    assert "partially priced (some of their usage ran on unpriced models)" in out
+    assert "1 command(s) partially priced (marked *): some of their usage ran on unpriced models." in out
+    # ...and the reader can see WHICH row the footnote is about: the ranking
+    # sorts on a priced subtotal that is typographically identical to an
+    # honest number.
+    assert "| `/review` | 3 | 3 | 640.0k | 0 | 0 | 0 | $7.00* |" in out
 
 
 def test_command_mode_flags_a_label_mixing_models_within_one_session(tu, tmp_path, monkeypatch):
@@ -149,7 +153,11 @@ def test_command_mode_flags_a_label_mixing_models_within_one_session(tu, tmp_pat
     assert rows["/mixed"]["cost_usd"] == 5.0          # 100k out @ $50/MTok, priced half
     assert rows["/mixed"]["partial"] is True
     assert rows["/commit"]["partial"] is False        # wholly priced, untouched
-    assert "2 command(s) partially priced" in tu.render_top_consumers(data)
+    out = tu.render_top_consumers(data)
+    assert "| `/mixed` | 1 | 2 | 200.0k | 0 | 0 | 0 | $5.00* |" in out
+    # /mystery is partial too, but its cost cell is already "—": counting it
+    # overstated how many of the numbers on screen mislead (one does).
+    assert "1 command(s) partially priced (marked *)" in out
 
 
 def test_render_empty_window_names_the_grouping(tu, tmp_path, monkeypatch):
@@ -181,3 +189,30 @@ def test_cli_top_consumers_markdown_and_bad_limit(tu, tmp_path, monkeypatch):
                        capture_output=True, text=True, env=env, check=False)
     assert r.returncode != 0
     assert r.stderr.strip() == "token-usage: --limit must be >= 1"
+
+
+def test_session_mode_marks_a_partially_priced_session(tu, tmp_path, monkeypatch):
+    # s5 mixes a priced and an unpriced model inside ONE session, so its
+    # cost_usd is a number covering half its tokens: it used to render
+    # identically to an honest row and rank above one with twice the tokens
+    # and the same figure. unpriced_rows only ever covered rows whose cost is
+    # None outright.
+    proj = seed(tmp_path, monkeypatch)
+    write_jsonl(proj / "-Users-x-one" / "s5.jsonl", [
+        user("2026-06-15T10:00:00Z", command="/build"),
+        assistant("2026-06-15T10:00:01Z", usage(out=40_000), request_id="r6"),
+        assistant("2026-06-15T10:01:01Z", usage(out=40_000),
+                  model="claude-mystery-9", request_id="r7"),
+    ])
+    data = tu.run_top_consumers(by="session", since="2026-01-01")
+    rows = {r["session_id"]: r for r in data["rows"]}
+    assert rows["s5"]["cost_usd"] == 2.0        # 40k out @ $50/MTok, priced half
+    assert rows["s5"]["partial"] is True
+    assert rows["s2"]["partial"] is False       # wholly priced
+    assert rows["s3"]["partial"] is True        # wholly unpriced (cost is None)
+    out = tu.render_top_consumers(data)
+    assert "| s5 | -Users-x-one | 2026-06-15 | 80.0k | 0 | 0 | 0 | $2.00* |" in out
+    assert "| s3 | -Users-x-two | 2026-06-13 | 1000.0k | 0 | 0 | 0 | — |" in out
+    # The wholly unpriced row already shows "—", so it is not one of the
+    # numbers that mislead: the count names only the marked cells.
+    assert "1 session(s) partially priced (marked *)" in out

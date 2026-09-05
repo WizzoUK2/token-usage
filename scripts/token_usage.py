@@ -925,12 +925,27 @@ def skipped_footnote(paths):
     return f"{len(paths)} transcript(s) skipped (unreadable): {', '.join(paths)}"
 
 
-def _usage_cells(u, cost):
+def _usage_cells(u, cost, partial=False):
     """The output/input/cache-read/cache-write/cost cells shared by every
-    history and top-consumers row (leading pipe included)."""
+    history and top-consumers row (leading pipe included).
+
+    `partial` marks a cost that is only a priced subtotal (some of the row's
+    usage ran on an unpriced model) with a trailing `*`, so the reader can see
+    which figure the footnote is about — an understated number is otherwise
+    typographically identical to an honest one, and the rows are ranked on it.
+    A row with no cost at all already shows "—" and is never marked."""
     return (f"| {fmt_tokens(u['output'])} | {fmt_tokens(u['input'])} "
             f"| {fmt_tokens(u['cache_read'])} | {fmt_tokens(u['cache_5m'] + u['cache_1h'])} "
-            f"| {fmt_cost(cost)} |")
+            f"| {fmt_cost(cost)}{'*' if partial and cost is not None else ''} |")
+
+
+def partial_footnote(rows):
+    """Footnote for rows whose cost cell is a priced subtotal, or None."""
+    n = sum(1 for r in rows if r.get("partial") and r.get("cost_usd") is not None)
+    if not n:
+        return None
+    return (f"{n} {{kind}}(s) partially priced (marked *): "
+            "some of their usage ran on unpriced models.")
 
 
 def render_history(data):
@@ -976,10 +991,14 @@ def run_top_consumers(by="session", since="30d", project=None, limit=10, warning
                             warnings=warnings):
         unpriced.update(unpriced_models(s.get("by_model", {}), pricing))
         if by == "session":
+            # "partial": some of this session's usage ran on an unpriced
+            # model, so cost_usd is a priced subtotal — the session ranks on
+            # it, and a bare number would hide that.
             sessions.append({"session_id": Path(s["path"]).stem, "path": s["path"],
                              "project": s["project"], "first_ts": s["first_ts"],
                              "usage": s["total"]["usage"],
-                             "cost_usd": s["total"]["cost_usd"]})
+                             "cost_usd": s["total"]["cost_usd"],
+                             "partial": bool(unpriced_models(s.get("by_model", {}), pricing))})
             continue
         for label, agg in s["by_label"].items():
             c = commands.setdefault(label, {"label": label, "sessions": 0, "invocations": 0,
@@ -1025,7 +1044,7 @@ def render_top_consumers(data):
         for r in data["rows"]:
             u = r["usage"]
             lines.append(f"| {r['session_id']} | {r['project']} | {(r['first_ts'] or '')[:10]} "
-                         + _usage_cells(u, r["cost_usd"]))
+                         + _usage_cells(u, r["cost_usd"], r.get("partial")))
     else:
         lines = ["| Command | Sessions | Calls | Output | Input | Cache read | Cache write | Est. cost |",
                  "|---|---:|---:|---:|---:|---:|---:|---:|"]
@@ -1033,20 +1052,19 @@ def render_top_consumers(data):
             u = r["usage"]
             name = r["label"] if r["label"] == OTHER_LABEL else f"`{r['label']}`"
             lines.append(f"| {name} | {r['sessions']} | {r['invocations']} "
-                         + _usage_cells(u, r["cost_usd"]))
+                         + _usage_cells(u, r["cost_usd"], r.get("partial")))
     notes = [unpriced_footnote(data.get("unpriced_models") or []),
              skipped_footnote(data.get("skipped_transcripts") or []),
              projects_dir_footnote(data.get("projects_dir_missing"))]
+    kind = "session" if data["by"] == "session" else "command"
+    note = partial_footnote(data["rows"])
+    if note:
+        notes.append(note.format(kind=kind))
     if data["by"] == "session":
         shown = sum(1 for r in data["rows"] if r["cost_usd"] is None)
         cut = (data.get("unpriced_rows") or 0) - shown
         if cut > 0:
             notes.append(f"{cut} unpriced session(s) rank last and were cut by --limit.")
-    else:
-        partial = sum(1 for r in data["rows"] if r.get("partial"))
-        if partial:
-            notes.append(f"{partial} command(s) partially priced "
-                         "(some of their usage ran on unpriced models).")
     for note in notes:
         if note:
             lines += ["", note]
@@ -1227,11 +1245,16 @@ def half_cost(summaries):
     return sum(s["total"]["cost_usd"] or 0.0 for s in summaries)
 
 
-def window_insights(summaries, cutoff, pricing, now=None):
+def window_insights(summaries, cutoff, pricing, now=None, halves=None):
     """Findings for a --since window: trend between the window's halves,
-    the top mover behind an increase, and window-wide unpriced models."""
+    the top mover behind an increase, and window-wide unpriced models.
+
+    `halves` lets the caller split the window ONCE and share the result: two
+    calls to window_halves() take their own datetime.now(), so the midpoints
+    could differ by a truncated second and the disclosure could then describe
+    a different split from the one the rules ran on."""
     out = []
-    first, second = window_halves(summaries, cutoff, now=now)
+    first, second = halves if halves is not None else window_halves(summaries, cutoff, now=now)
     c1, c2 = half_cost(first), half_cost(second)
 
     # 7: spend trend, half over half
@@ -1291,12 +1314,18 @@ def run_insights(transcript=None, since=None, project=None, budget=None, warning
         # The trend rules compare the window's halves, so "how many sessions
         # matched" is not the whole story of what could be compared: report
         # the first half too, and let the renderer disclose a dead one.
-        first, _second = window_halves(summaries, cutoff)
+        halves = window_halves(summaries, cutoff)
+        first = halves[0]
+        c1 = half_cost(first)
         return {"mode": "window",
-                "findings": window_insights(summaries, cutoff, pricing),
+                "findings": window_insights(summaries, cutoff, pricing, halves=halves),
+                # "first_half_spend" is the rules' own predicate, UNROUNDED:
+                # first_half_cost is rounded for the payload, and a first half
+                # under $5e-7 rounds to 0.0 while rules 7-8 still run on it.
                 "baseline": {"sessions": len(summaries), "since": since,
                              "first_half_sessions": len(first),
-                             "first_half_cost": round(half_cost(first), 6)},
+                             "first_half_cost": round(c1, 6),
+                             "first_half_spend": c1 > 0},
                 "skipped_transcripts": skipped,
                 "projects_dir_missing": missing_root}
     t = resolve_transcript(transcript)
@@ -1332,7 +1361,10 @@ def insights_caveat(result):
         rules 1-2 off for every young project;
       * window mode — rules 7-8 are gated on the window's first half holding
         spend, so a window longer than the project's history (or one whose
-        sessions all land after its midpoint) switches them off too.
+        sessions all land after its midpoint) switches them off too. This
+        keys off `first_half_spend`, the rules' OWN unrounded predicate:
+        gating on the rounded `first_half_cost` made the qualifier deny
+        trend findings printed two lines above it.
 
     A count the caller did not supply is left alone: state only what we know."""
     b = result.get("baseline") or {}
@@ -1343,8 +1375,16 @@ def insights_caveat(result):
             return (f"(baseline: {n} prior session(s); the comparison rules "
                     f"need {INSIGHT_MIN_BASELINE_SESSIONS})")
     elif mode == "window":
-        c1 = b.get("first_half_cost")
-        if b.get("sessions") and c1 is not None and c1 <= 0:
+        if not b.get("sessions"):
+            return ""
+        spent = b.get("first_half_spend")
+        if spent is None:                       # a result from before the key
+            c1 = b.get("first_half_cost")
+            spent = c1 is None or c1 > 0
+        if not spent:
+            if b.get("first_half_sessions") == 0:
+                return ("(baseline: no sessions in the window's first half; "
+                        "the trend rules need both halves)")
             return ("(baseline: no spend in the window's first half; "
                     "the trend rules need both halves)")
     return ""
