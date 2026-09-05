@@ -112,7 +112,7 @@ def test_session_mode_discloses_unpriced_rows_cut_by_the_limit(tu, tmp_path, mon
         tu.render_top_consumers(cut)
 
 
-def test_command_mode_flags_partially_priced_labels(tu, tmp_path, monkeypatch, tmp_path_factory):
+def test_command_mode_flags_partially_priced_labels(tu, tmp_path, monkeypatch):
     # /review runs in two sessions, one of them on an unpriced model: the
     # cost shown is the priced subtotal only, which has to be disclosed.
     proj = seed(tmp_path, monkeypatch)
