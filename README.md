@@ -119,7 +119,7 @@ python3 scripts/token_usage.py top_consumers --since 30d --limit 10
 python3 scripts/token_usage.py top_consumers --by command --project my-repo --json
 ```
 
-With no argument `report` and `json` pick the most recent session for the current directory's project.
+With no argument, `report` and `json` pick the most recent session for the current directory's project; failing that, the Cowork sandbox mount; failing that too, the newest transcript under **any** project on the machine. That last step means running these outside a directory with its own Claude Code history can pick up a different project's most recent session rather than reporting "not found" — pass an explicit transcript path when it matters which session gets analysed.
 
 ### Budget nudges
 

@@ -37,6 +37,17 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **Transcript auto-discovery falls back further when there's no project
+  context.** `report`, `json`, and `insights` used to return "no transcript
+  found" when the cwd had no Claude Code project directory and no Cowork
+  mount existed. They (and `find_latest_transcript()`, which the MCP server's
+  "current session" resolution also uses) now fall back one step further to
+  the newest transcript under *any* project on the machine. This is
+  necessary for Claude desktop and MCP callers with no project context to
+  anchor on, but it also means running these commands from a directory with
+  no Claude Code history of its own can silently analyse a different
+  project's most recent session instead of failing — pass an explicit
+  transcript path or session id when that matters.
 - **Sonnet 5 priced at $2/$10** (was $3/$15). Anthropic made the launch
   price permanent in September 2026 instead of raising it, so the "promo not
   modelled" caveat is gone. Sonnet 5 session costs drop by a third vs 0.5.0.
