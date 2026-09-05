@@ -37,6 +37,12 @@ Claude Code tells you session totals (`/cost`, OTel metrics) and tools like ccus
 - **User pricing overlay** — drop rates into `~/.config/token-usage/pricing.json`
   to price new models the bundled table doesn't know yet; reports name any
   unpriced models they encounter.
+- **MCP server** — a bundled stdio MCP server (`scripts/mcp_server.py`, stdlib only)
+  exposes `session_cost`, `history`, `insights`, `diff` and `top_consumers` as tools.
+  Claude Code starts it automatically with the plugin; Claude desktop can register the
+  same script. JSON by default, `format: "markdown"` for the rendered tables.
+- **Top consumers** — `top_consumers --by session|command` lists the costliest sessions
+  or command labels in a window, the question `history` could not answer directly.
 
 ## Installation
 
@@ -107,6 +113,10 @@ python3 scripts/token_usage.py insights [transcript.jsonl]     # session-mode ru
 python3 scripts/token_usage.py insights --since 30d            # window-mode rule checks
 python3 scripts/token_usage.py insights --since 30d --project myrepo
 python3 scripts/token_usage.py insights --json [transcript.jsonl]
+
+# Costliest sessions (or --by command) in the last 30 days
+python3 scripts/token_usage.py top_consumers --since 30d --limit 10
+python3 scripts/token_usage.py top_consumers --by command --project my-repo --json
 ```
 
 With no argument `report` and `json` pick the most recent session for the current directory's project.
@@ -127,6 +137,51 @@ When the session's estimated cost crosses the threshold the Stop hook emits a `s
 ### Statusline (optional)
 
 `examples/statusline.sh` reads the live ledger and renders e.g. `⏶ 214k out · $33.87 · top: /code-review`. Wire it up with `/statusline` or merge it into your existing statusline script. Requires `jq`.
+
+### MCP server
+
+The plugin ships a stdio MCP server (`.mcp.json` → `scripts/mcp_server.py`, stdlib only,
+no install). When the plugin is enabled, Claude Code starts it and the tools appear as
+`mcp__plugin_token-usage_token-usage__<tool>`:
+
+| Tool | What it answers |
+|---|---|
+| `session_cost` | Per-activity breakdown of one session (`transcript` or `session_id`; defaults to the current project's newest session). Result names the transcript analysed. |
+| `history` | Cross-session rollup `by` project / day / command / model, with `since` and `project` filters. |
+| `insights` | Rule-based findings: session mode (one session vs the project's 30-day norms) or window mode (`since`). Optional `budget_usd`. |
+| `diff` | Per-activity cost and output deltas between two sessions (paths or session ids). |
+| `top_consumers` | Costliest sessions or command labels in a window (`by`, `since`, `project`, `limit`). |
+
+Every tool takes `format`: `json` (default, same shapes as the CLI's JSON output) or
+`markdown` (the rendered table). Failures come back as tool results with `isError`, never
+as protocol errors, so a missing transcript or a bad `since` is a readable message.
+
+**"Current session"** resolves in this order: explicit `transcript` path → `session_id`
+(searched across every project) → newest transcript for `TOKEN_USAGE_PROJECT_DIR`
+(Claude Code passes `${CLAUDE_PROJECT_DIR}`) → the Cowork mount → newest transcript on
+the machine (Claude desktop, which has no project dir).
+
+**Claude desktop / Cowork.** Add to `claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "token-usage": {
+      "command": "python3",
+      "args": ["/absolute/path/to/token-usage/scripts/mcp_server.py"]
+    }
+  }
+}
+```
+
+or, for a Claude Code user scope outside the plugin:
+
+```bash
+claude mcp add --scope user token-usage -- python3 /absolute/path/to/token-usage/scripts/mcp_server.py
+```
+
+The server reads `~/.claude/projects` on the host, so a desktop session sees the same
+history the CLI does. No caching in-process: pricing overlay edits apply on the next call.
 
 ## Insights
 

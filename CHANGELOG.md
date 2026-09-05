@@ -6,8 +6,24 @@ adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-09-04
+
 ### Added
 
+- **MCP server** — `scripts/mcp_server.py`, a stdlib stdio JSON-RPC 2.0 server
+  registered by the plugin's new `.mcp.json` (Claude Code auto-starts it; Claude
+  desktop can register the same script). Tools: `session_cost`, `history`,
+  `insights`, `diff`, `top_consumers`; `format: json|markdown`; tool failures
+  are `isError` results, protocol problems are JSON-RPC errors; nothing but
+  JSON-RPC reaches stdout. Current session resolves from
+  `TOKEN_USAGE_PROJECT_DIR` (`${CLAUDE_PROJECT_DIR}`), then the Cowork mount,
+  then the newest transcript anywhere.
+- **`top_consumers` subcommand** — costliest sessions (`--by session`) or
+  command labels aggregated across sessions (`--by command`) in a window;
+  `--since`, `--project`, `--limit`, `--json`. Unpriced rows sort last.
+- **Session-id lookup** — `locate_transcript()` resolves a Claude Code session
+  id across every project; `resolve_transcript()` now fails cleanly on a
+  non-existent explicit path instead of crashing in the parser.
 - **Pricing:** `claude-fable-5-1`, `claude-mythos-5-1` ($10/$50, cache hits
   $0.25/MTok) and `claude-opus-5` ($5/$25) in the bundled table. Fable 5.1
   usage previously fell through the prefix matcher to the `claude-fable-5`
@@ -190,7 +206,8 @@ Initial release.
 - Standalone CLI: `python3 scripts/token_usage.py report|json [transcript]`.
 - Optional statusline example (`examples/statusline.sh`, requires `jq`).
 
-[Unreleased]: https://github.com/WizzoUK2/token-usage/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/WizzoUK2/token-usage/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/WizzoUK2/token-usage/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/WizzoUK2/token-usage/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/WizzoUK2/token-usage/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/WizzoUK2/token-usage/compare/v0.2.0...v0.3.0
