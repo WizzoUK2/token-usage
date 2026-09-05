@@ -939,12 +939,15 @@ def _usage_cells(u, cost, partial=False):
             f"| {fmt_cost(cost)}{'*' if partial and cost is not None else ''} |")
 
 
-def partial_footnote(rows):
-    """Footnote for rows whose cost cell is a priced subtotal, or None."""
+def partial_footnote(rows, kind):
+    """Footnote for rows whose cost cell is a priced subtotal, or None.
+
+    Counts only the MARKED cells: a row with no cost at all already shows "—",
+    so counting it overstates how many of the numbers on screen mislead."""
     n = sum(1 for r in rows if r.get("partial") and r.get("cost_usd") is not None)
     if not n:
         return None
-    return (f"{n} {{kind}}(s) partially priced (marked *): "
+    return (f"{n} {kind}(s) partially priced (marked *): "
             "some of their usage ran on unpriced models.")
 
 
@@ -1056,10 +1059,9 @@ def render_top_consumers(data):
     notes = [unpriced_footnote(data.get("unpriced_models") or []),
              skipped_footnote(data.get("skipped_transcripts") or []),
              projects_dir_footnote(data.get("projects_dir_missing"))]
-    kind = "session" if data["by"] == "session" else "command"
-    note = partial_footnote(data["rows"])
+    note = partial_footnote(data["rows"], data["by"])
     if note:
-        notes.append(note.format(kind=kind))
+        notes.append(note)
     if data["by"] == "session":
         shown = sum(1 for r in data["rows"] if r["cost_usd"] is None)
         cut = (data.get("unpriced_rows") or 0) - shown
