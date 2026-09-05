@@ -79,6 +79,22 @@ adheres to [Semantic Versioning](https://semver.org/).
   Auto-discovery can land on a session in a different project (see the
   fallback change above), so which one was analysed is no longer left
   implicit. Scripts parsing the text output should expect the extra line.
+- **MCP argument checking is stricter and speaks its own vocabulary.** A bad
+  window value now reads `invalid since value …` (the CLI still says
+  `--since`); `since`/`project` reject the empty string; `budget_usd` must be
+  greater than 0; `transcript` and `session_id` together, and `project`
+  alongside a session selector on `insights`, are rejected instead of one
+  silently winning. A handler that exits without a message reports
+  `<tool>: exited with status <code>` and an unexpected exception now leaves a
+  traceback on stderr for the host log.
+- **`top_consumers --by command` on an empty window** says "No commands in
+  window." rather than "No sessions in window.".
+- **The `report` skill also allows the user-scope tool names**
+  (`mcp__token-usage__*`) alongside the plugin's
+  `mcp__plugin_token-usage_token-usage__*`, so a hand-registered server is
+  usable from the skill.
+- **CI runs `ruff check scripts tests`** (ruff's default rule set, no config
+  file) alongside the pytest matrix.
 - **Sonnet 5 priced at $2/$10** (was $3/$15). Anthropic made the launch
   price permanent in September 2026 instead of raising it, so the "promo not
   modelled" caveat is gone. Sonnet 5 session costs drop by a third vs 0.5.0.

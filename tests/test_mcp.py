@@ -218,7 +218,7 @@ def seed(tmp_path, monkeypatch):
     # Discovery with no project dir falls through to the Cowork sandbox mounts,
     # which on a real Cowork machine hold a transcript this suite must not see
     # (cf. the same neutralisation in tests/test_locate.py).
-    monkeypatch.setattr(TOKEN_USAGE, "_cowork_roots", lambda: [])
+    monkeypatch.setattr(TOKEN_USAGE, "_cowork_roots", list)
     monkeypatch.chdir(tmp_path)
     return proj, s1, s2
 
@@ -230,7 +230,7 @@ def call(mcp, name, **arguments):
 
 
 def test_session_cost_json_default_names_transcript(mcp, tmp_path, monkeypatch):
-    proj, s1, s2 = seed(tmp_path, monkeypatch)
+    _proj, s1, _s2 = seed(tmp_path, monkeypatch)
     text, err = call(mcp, "session_cost", transcript=str(s1))
     assert not err
     data = json.loads(text)
@@ -240,7 +240,7 @@ def test_session_cost_json_default_names_transcript(mcp, tmp_path, monkeypatch):
 
 
 def test_session_cost_by_session_id_and_markdown(mcp, tmp_path, monkeypatch):
-    proj, s1, s2 = seed(tmp_path, monkeypatch)
+    _proj, _s1, s2 = seed(tmp_path, monkeypatch)
     text, err = call(mcp, "session_cost", session_id="bbb-222", format="markdown", models=True)
     assert not err
     assert text.startswith("| Activity |")
@@ -251,7 +251,7 @@ def test_session_cost_by_session_id_and_markdown(mcp, tmp_path, monkeypatch):
 
 
 def test_session_cost_rejects_blank_selectors(mcp, tmp_path, monkeypatch):
-    proj, s1, s2 = seed(tmp_path, monkeypatch)
+    _proj, _s1, _s2 = seed(tmp_path, monkeypatch)
     text, err = call(mcp, "session_cost", transcript="")
     assert err and "blank" in text
     text, err = call(mcp, "session_cost", session_id="")
@@ -261,7 +261,7 @@ def test_session_cost_rejects_blank_selectors(mcp, tmp_path, monkeypatch):
 
 
 def test_session_cost_uses_project_dir_env_then_newest_anywhere(mcp, tmp_path, monkeypatch):
-    proj, s1, s2 = seed(tmp_path, monkeypatch)
+    _proj, s1, s2 = seed(tmp_path, monkeypatch)
     monkeypatch.setenv("TOKEN_USAGE_PROJECT_DIR", "/Users/x/alpha")
     assert json.loads(call(mcp, "session_cost")[0])["transcript"] == str(s1)
     monkeypatch.delenv("TOKEN_USAGE_PROJECT_DIR")
@@ -269,7 +269,7 @@ def test_session_cost_uses_project_dir_env_then_newest_anywhere(mcp, tmp_path, m
 
 
 def test_session_cost_not_found_is_a_tool_error(mcp, tmp_path, monkeypatch):
-    proj, s1, s2 = seed(tmp_path, monkeypatch)
+    proj, _s1, _s2 = seed(tmp_path, monkeypatch)
     text, err = call(mcp, "session_cost", session_id="zzz-000")
     assert err and "zzz-000" in text and str(proj) in text
     text, err = call(mcp, "session_cost", transcript=str(tmp_path / "gone.jsonl"))
@@ -277,7 +277,7 @@ def test_session_cost_not_found_is_a_tool_error(mcp, tmp_path, monkeypatch):
 
 
 def test_diff_by_path_and_id(mcp, tmp_path, monkeypatch):
-    proj, s1, s2 = seed(tmp_path, monkeypatch)
+    _proj, s1, _s2 = seed(tmp_path, monkeypatch)
     data = json.loads(call(mcp, "diff", old=str(s1), new="bbb-222")[0])
     review = next(r for r in data["rows"] if r["label"] == "/review")
     assert review["delta_output"] == -60_000
@@ -288,7 +288,7 @@ def test_diff_by_path_and_id(mcp, tmp_path, monkeypatch):
 
 
 def test_diff_rejects_blank_selectors(mcp, tmp_path, monkeypatch):
-    proj, s1, s2 = seed(tmp_path, monkeypatch)
+    _proj, s1, _s2 = seed(tmp_path, monkeypatch)
     text, err = call(mcp, "diff", old="", new="bbb-222")
     assert err and "blank" in text
     text, err = call(mcp, "diff", old=str(s1), new="   ")
@@ -299,7 +299,7 @@ def test_diff_reports_a_mistyped_path_as_a_path(mcp, tmp_path, monkeypatch):
     # A value that looks like a path (separator, or a .jsonl suffix) is never a
     # session id, so the error must say the file is missing rather than send
     # the user hunting for a session called "/nope/typo.jsonl".
-    proj, s1, s2 = seed(tmp_path, monkeypatch)
+    _proj, _s1, _s2 = seed(tmp_path, monkeypatch)
     text, err = call(mcp, "diff", old=str(tmp_path / "nope" / "typo.jsonl"), new="bbb-222")
     assert err and "transcript not found" in text and "typo.jsonl" in text
     text, err = call(mcp, "diff", old="gone.jsonl", new="bbb-222")
@@ -318,11 +318,11 @@ def test_history_json_matches_cli_and_markdown_renders(mcp, tu, tmp_path, monkey
 def test_history_bad_since_is_a_tool_error(mcp, tmp_path, monkeypatch):
     seed(tmp_path, monkeypatch)
     text, err = call(mcp, "history", since="last tuesday")
-    assert err and "invalid --since" in text
+    assert err and "invalid since value" in text
 
 
 def test_insights_session_mode_names_transcript(mcp, tmp_path, monkeypatch):
-    proj, s1, s2 = seed(tmp_path, monkeypatch)
+    _proj, _s1, s2 = seed(tmp_path, monkeypatch)
     data = json.loads(call(mcp, "insights", session_id="bbb-222", budget_usd=1.0)[0])
     assert data["mode"] == "session" and data["transcript"] == str(s2)
     assert isinstance(data["findings"], list)
@@ -330,7 +330,7 @@ def test_insights_session_mode_names_transcript(mcp, tmp_path, monkeypatch):
     assert not err
     # Whatever the rules find (or don't), the markdown names the session.
     assert f"(session: {s2.parent.name}/{s2.name})" in md
-    assert md.startswith("No notable findings.") or md.startswith("- [")
+    assert md.startswith(("No notable findings.", "- ["))
 
 
 def test_insights_window_mode(mcp, tmp_path, monkeypatch):
@@ -401,7 +401,7 @@ def test_top_consumers_default_since_is_30d(mcp, tmp_path, monkeypatch):
 
 
 def test_top_consumers_default_limit_is_10(mcp, tmp_path, monkeypatch):
-    proj, s1, s2 = seed(tmp_path, monkeypatch)
+    proj, _s1, _s2 = seed(tmp_path, monkeypatch)
     # Two more sessions so a limit=10 default is distinguishable from a
     # regression to some smaller number (e.g. 3) -- with only 2 rows both
     # limits would look identical.
@@ -421,7 +421,7 @@ def test_top_consumers_default_limit_is_10(mcp, tmp_path, monkeypatch):
 
 
 def test_insights_session_mode_budget_usd_is_passed_through(mcp, tu, tmp_path, monkeypatch):
-    proj, s1, s2 = seed(tmp_path, monkeypatch)
+    _proj, _s1, s2 = seed(tmp_path, monkeypatch)
     monkeypatch.delenv("TOKEN_USAGE_BUDGET_USD", raising=False)
     baseline_cost = tu.aggregate(tu.parse_session(s2), tu.load_pricing())["total"]["cost_usd"]
     # A budget that puts this session's cost at 80% of budget -- inside the
@@ -435,7 +435,7 @@ def test_insights_session_mode_budget_usd_is_passed_through(mcp, tu, tmp_path, m
 
 
 def test_insights_session_mode_falls_back_to_budget_env_var(mcp, tu, tmp_path, monkeypatch):
-    proj, s1, s2 = seed(tmp_path, monkeypatch)
+    _proj, _s1, s2 = seed(tmp_path, monkeypatch)
     baseline_cost = tu.aggregate(tu.parse_session(s2), tu.load_pricing())["total"]["cost_usd"]
     budget = baseline_cost / 0.8
     monkeypatch.setenv("TOKEN_USAGE_BUDGET_USD", str(budget))
@@ -452,7 +452,7 @@ def test_mcp_json_registers_server_with_plugin_root_paths():
 
 
 def test_end_to_end_over_pipes(tmp_path, monkeypatch):
-    proj, s1, s2 = seed(tmp_path, monkeypatch)
+    proj, _s1, s2 = seed(tmp_path, monkeypatch)
     env = dict(os.environ, TOKEN_USAGE_PROJECTS_DIR=str(proj),
                TOKEN_USAGE_LEDGER_DIR=str(tmp_path / "cache"),
                TOKEN_USAGE_PROJECT_DIR="/Users/x/beta")
@@ -466,7 +466,7 @@ def test_end_to_end_over_pipes(tmp_path, monkeypatch):
             arguments={"since": "2026-01-01", "format": "markdown"}),
     ]) + "\n"
     r = subprocess.run([sys.executable, str(SERVER)], input=script, capture_output=True,
-                       text=True, env=env, timeout=30)
+                       text=True, env=env, timeout=30, check=False)
     assert r.returncode == 0, r.stderr
     assert r.stderr == ""
     replies = {m["id"]: m for m in (json.loads(l) for l in r.stdout.splitlines())}
@@ -499,7 +499,7 @@ def test_project_dir_from_env_treats_unexpanded_and_blank_as_unset(mcp, monkeypa
 
 
 def test_session_cost_survives_an_unexpanded_or_blank_project_dir(mcp, tmp_path, monkeypatch):
-    proj, s1, s2 = seed(tmp_path, monkeypatch)
+    _proj, _s1, s2 = seed(tmp_path, monkeypatch)
     monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
     for raw in ("${CLAUDE_PROJECT_DIR}", ""):
         monkeypatch.setenv("TOKEN_USAGE_PROJECT_DIR", raw)
@@ -509,14 +509,14 @@ def test_session_cost_survives_an_unexpanded_or_blank_project_dir(mcp, tmp_path,
 
 
 def test_session_cost_falls_back_to_claude_project_dir(mcp, tmp_path, monkeypatch):
-    proj, s1, s2 = seed(tmp_path, monkeypatch)
+    _proj, s1, _s2 = seed(tmp_path, monkeypatch)
     monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/x/alpha")
     data = json.loads(call(mcp, "session_cost")[0])
     assert data["transcript"] == str(s1) and data["resolved_via"] == "project_dir"
 
 
 def test_session_cost_reports_the_rung_and_flags_a_guess(mcp, tmp_path, monkeypatch):
-    proj, s1, s2 = seed(tmp_path, monkeypatch)
+    _proj, s1, s2 = seed(tmp_path, monkeypatch)
     monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
     assert json.loads(call(mcp, "session_cost", transcript=str(s1))[0])["resolved_via"] == "explicit"
     assert json.loads(call(mcp, "session_cost", session_id="bbb-222")[0])["resolved_via"] == "session_id"
@@ -530,7 +530,7 @@ def test_session_cost_reports_the_rung_and_flags_a_guess(mcp, tmp_path, monkeypa
 
 
 def test_insights_reports_the_rung_and_flags_a_guess(mcp, tmp_path, monkeypatch):
-    proj, s1, s2 = seed(tmp_path, monkeypatch)
+    _proj, _s1, _s2 = seed(tmp_path, monkeypatch)
     monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
     data = json.loads(call(mcp, "insights")[0])
     assert data["resolved_via"] == "any_project"
@@ -539,7 +539,7 @@ def test_insights_reports_the_rung_and_flags_a_guess(mcp, tmp_path, monkeypatch)
 
 
 def test_broken_env_transcript_is_diagnosed(mcp, tmp_path, monkeypatch):
-    proj, s1, s2 = seed(tmp_path, monkeypatch)
+    _proj, _s1, _s2 = seed(tmp_path, monkeypatch)
     gone = tmp_path / "gone.jsonl"
     monkeypatch.setenv("TOKEN_USAGE_TRANSCRIPT", str(gone))
     text, err = call(mcp, "session_cost")
@@ -548,7 +548,7 @@ def test_broken_env_transcript_is_diagnosed(mcp, tmp_path, monkeypatch):
 
 
 def test_nothing_found_names_projects_dir_project_dir_and_session_id(mcp, tmp_path, monkeypatch):
-    proj, s1, s2 = seed(tmp_path, monkeypatch)
+    proj, _s1, _s2 = seed(tmp_path, monkeypatch)
     monkeypatch.setenv("TOKEN_USAGE_PROJECT_DIR", "/Users/x/no-sessions-yet")
     text, err = call(mcp, "session_cost")
     assert err
@@ -566,7 +566,7 @@ def write_overlay(monkeypatch, tmp_path, text):
 def test_pricing_overlay_problems_reach_the_caller(mcp, tmp_path, monkeypatch):
     # A malformed overlay reverts costs to bundled rates. On the CLI that is a
     # stderr line; over MCP stderr is invisible, so it has to be in the result.
-    proj, s1, s2 = seed(tmp_path, monkeypatch)
+    _proj, s1, _s2 = seed(tmp_path, monkeypatch)
     overlay = write_overlay(monkeypatch, tmp_path, "{not json")
     data = json.loads(call(mcp, "session_cost", transcript=str(s1))[0])
     assert data["warnings"] == [f"ignoring malformed pricing file {overlay}"]
@@ -575,7 +575,7 @@ def test_pricing_overlay_problems_reach_the_caller(mcp, tmp_path, monkeypatch):
 
 
 def test_every_tool_carries_a_warnings_key(mcp, tmp_path, monkeypatch):
-    proj, s1, s2 = seed(tmp_path, monkeypatch)
+    _proj, s1, _s2 = seed(tmp_path, monkeypatch)
     overlay = write_overlay(monkeypatch, tmp_path, "{not json")
     expected = [f"ignoring malformed pricing file {overlay}"]
     for name, args in (("session_cost", {"transcript": str(s1)}),
@@ -590,7 +590,7 @@ def test_every_tool_carries_a_warnings_key(mcp, tmp_path, monkeypatch):
 
 
 def test_clean_overlay_means_no_warnings(mcp, tmp_path, monkeypatch):
-    proj, s1, s2 = seed(tmp_path, monkeypatch)
+    _proj, s1, _s2 = seed(tmp_path, monkeypatch)
     write_overlay(monkeypatch, tmp_path, json.dumps({"claude-x": {"input": 1.0, "output": 2.0}}))
     assert json.loads(call(mcp, "session_cost", transcript=str(s1))[0])["warnings"] == []
     md, _ = call(mcp, "session_cost", transcript=str(s1), format="markdown")
@@ -598,7 +598,7 @@ def test_clean_overlay_means_no_warnings(mcp, tmp_path, monkeypatch):
 
 
 def test_junk_budget_env_is_reported_as_a_warning(mcp, tmp_path, monkeypatch):
-    proj, s1, s2 = seed(tmp_path, monkeypatch)
+    _proj, _s1, _s2 = seed(tmp_path, monkeypatch)
     monkeypatch.setenv("TOKEN_USAGE_BUDGET_USD", "ten pounds")
     data = json.loads(call(mcp, "insights", session_id="bbb-222")[0])
     assert data["warnings"] == ["ignoring TOKEN_USAGE_BUDGET_USD='ten pounds' — not a number"]
@@ -613,3 +613,95 @@ def test_budget_usd_must_be_positive(mcp, tmp_path, monkeypatch):
               "properties": {"n": {"type": "number", "exclusiveMinimum": 0}}}
     assert mcp.validate_args(schema, {"n": 0.0}) == ["n must be > 0"]
     assert mcp.validate_args(schema, {"n": 0.1}) == []
+
+
+def test_exception_path_prints_a_traceback_and_restores_stdout(mcp, capsys):
+    real = sys.stdout
+    mcp.SCHEMAS["boom2"] = {"type": "object", "properties": {}, "additionalProperties": False}
+    mcp.HANDLERS["boom2"] = lambda args: 1 / 0
+    r = mcp.call_tool("boom2", {})
+    assert sys.stdout is real
+    out, err = capsys.readouterr()
+    assert out == ""                                  # stdout stays JSON-RPC only
+    assert r["isError"] and "ZeroDivisionError" in r["content"][0]["text"]
+    assert "Traceback (most recent call last)" in err and "ZeroDivisionError" in err
+
+
+def test_bare_sys_exit_status_is_reported_not_swallowed(mcp, capsys):
+    # sys.exit(1) sets code to an int, whose str() is a bare "1" — useless as a
+    # tool error message. Only a non-empty string code is a message.
+    real = sys.stdout
+    mcp.SCHEMAS["quitter"] = {"type": "object", "properties": {}, "additionalProperties": False}
+
+    def quitter(args):
+        sys.exit(1)
+    mcp.HANDLERS["quitter"] = quitter
+    r = mcp.call_tool("quitter", {})
+    assert sys.stdout is real
+    assert r["isError"] and r["content"][0]["text"] == "quitter: exited with status 1"
+
+    def silent(args):
+        sys.exit()
+    mcp.HANDLERS["silent"] = silent
+    mcp.SCHEMAS["silent"] = mcp.SCHEMAS["quitter"]
+    r = mcp.call_tool("silent", {})
+    assert sys.stdout is real
+    assert r["isError"] and r["content"][0]["text"] == "silent: exited with status None"
+    capsys.readouterr()
+
+
+def test_since_errors_use_the_tools_own_vocabulary(mcp, tmp_path, monkeypatch):
+    # The MCP caller never typed "--since", so the analyser's CLI flag name is
+    # noise in a tool error.
+    seed(tmp_path, monkeypatch)
+    for name in ("history", "insights", "top_consumers"):
+        text, err = call(mcp, name, since="last tuesday")
+        assert err and "invalid since value" in text, name
+        assert "--since" not in text, name
+
+
+def test_transcript_and_session_id_together_are_rejected(mcp, tmp_path, monkeypatch):
+    _proj, s1, _s2 = seed(tmp_path, monkeypatch)
+    for name in ("session_cost", "insights"):
+        text, err = call(mcp, name, transcript=str(s1), session_id="bbb-222")
+        assert err and text == "pass transcript OR session_id, not both", name
+
+
+def test_insights_project_is_window_mode_only(mcp, tmp_path, monkeypatch):
+    _proj, _s1, _s2 = seed(tmp_path, monkeypatch)
+    text, err = call(mcp, "insights", session_id="bbb-222", project="beta")
+    assert err and text == "project applies to window mode (with since)"
+    assert mcp.SCHEMAS["insights"]["properties"]["project"]["description"].endswith(
+        "Window mode only.")
+    # The shared PROJECT description is untouched for the tools that filter.
+    assert mcp.SCHEMAS["history"]["properties"]["project"] == mcp.PROJECT
+
+
+def test_blank_window_selectors_are_rejected(mcp, tmp_path, monkeypatch):
+    seed(tmp_path, monkeypatch)
+    assert mcp.SINCE["minLength"] == 1 and mcp.PROJECT["minLength"] == 1
+    text, err = call(mcp, "history", since="")
+    assert err and "since must be at least 1 character" in text
+    text, err = call(mcp, "history", project="")
+    assert err and "project must be at least 1 character" in text
+    schema = {"type": "object", "additionalProperties": False,
+              "properties": {"s": {"type": "string", "minLength": 1}}}
+    assert mcp.validate_args(schema, {"s": "x"}) == []
+
+
+def test_plugin_version_survives_a_broken_manifest(mcp, tmp_path, monkeypatch, capsys):
+    bad = tmp_path / "plugin.json"
+    bad.write_text("[]")                       # valid JSON, wrong shape -> AttributeError
+    monkeypatch.setattr(mcp, "plugin_manifest_path", lambda: bad)
+    assert mcp.plugin_version() == "0"
+    err = capsys.readouterr().err
+    assert str(bad) in err and err.count("plugin manifest") == 1
+    monkeypatch.setattr(mcp, "plugin_manifest_path", lambda: tmp_path / "gone.json")
+    assert mcp.plugin_version() == "0"
+    assert "plugin manifest" in capsys.readouterr().err
+
+
+def test_batch_arrays_are_rejected_and_documented(mcp):
+    assert "batch" in mcp.handle_message.__doc__
+    r = mcp.handle_message([{"jsonrpc": "2.0", "id": 1, "method": "ping"}])
+    assert r["error"]["code"] == -32600

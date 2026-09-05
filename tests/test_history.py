@@ -235,7 +235,8 @@ def test_v2_index_entry_reparses_once(tu, monkeypatch, tmp_path):
     s1, hit1 = tu.cached_summary(t, tu.load_pricing())
     assert not hit1 and s1["version"] == 3
     # forge a stale v2 entry: same mtime/size but version 2 and no by_day
-    import hashlib, json as j
+    import hashlib
+    import json as j
     cache_file = tu.index_dir() / (hashlib.sha1(str(t).encode()).hexdigest() + ".json")
     stale = j.loads(cache_file.read_text())
     stale["version"] = 2
@@ -243,7 +244,7 @@ def test_v2_index_entry_reparses_once(tu, monkeypatch, tmp_path):
     cache_file.write_text(j.dumps(stale))
     s2, hit2 = tu.cached_summary(t, tu.load_pricing())
     assert not hit2 and s2["version"] == 3 and "by_day" in s2   # re-parsed
-    s3, hit3 = tu.cached_summary(t, tu.load_pricing())
+    _s3, hit3 = tu.cached_summary(t, tu.load_pricing())
     assert hit3                                                  # now cached
 
 
@@ -276,7 +277,7 @@ def test_index_recomputes_when_pricing_changes(tu, monkeypatch, tmp_path):
     old = {"claude-sonnet-5": {"input": 3.0, "output": 15.0}}
     new = {"claude-sonnet-5": {"input": 2.0, "output": 10.0}}
     s1, hit1 = tu.cached_summary(t, old)
-    s2, hit2 = tu.cached_summary(t, old)
+    _s2, hit2 = tu.cached_summary(t, old)
     s3, hit3 = tu.cached_summary(t, new)
     assert (hit1, hit2, hit3) == (False, True, False)
     assert s1["total"]["cost_usd"] == 15.0

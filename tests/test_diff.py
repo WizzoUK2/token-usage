@@ -1,5 +1,3 @@
-import json
-
 from conftest import assistant, usage, user, write_jsonl
 
 
@@ -48,7 +46,7 @@ def test_diff_unpriceable_side_renders_unknown_not_savings(tu, tmp_path):
     assert row["b_cost"] is None
     assert row["delta_cost"] is None            # unknown, NOT a negative "saving"
     out = tu.render_diff(d)
-    total_line = [l for l in out.splitlines() if "Total" in l][0]
+    total_line = next(l for l in out.splitlines() if "Total" in l)
     assert "**—**" in total_line                 # total delta also unknown
 
 
@@ -78,7 +76,7 @@ def test_render_diff_total_math_and_signs(tu, tmp_path):
     ])
     out = tu.render_diff(tu.diff_data(a, b, tu.load_pricing()))
     # fable output $50/MTok: A=$5.00, B=$2.00, Δ=-$3.00
-    total_line = [l for l in out.splitlines() if "Total" in l][0]
+    total_line = next(l for l in out.splitlines() if "Total" in l)
     assert "**$5.00**" in total_line and "**$2.00**" in total_line
     assert "**-$3.00**" in total_line
     assert "-60.0k" in total_line

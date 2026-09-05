@@ -12,7 +12,7 @@ def run_hook(payload, tmp_path, extra_env=None):
     env.update(extra_env or {})
     return subprocess.run(
         [sys.executable, str(SCRIPT), "hook"],
-        input=json.dumps(payload), capture_output=True, text=True, env=env,
+        input=json.dumps(payload), capture_output=True, text=True, env=env, check=False,
     )
 
 
@@ -33,7 +33,7 @@ def test_hook_writes_ledger_and_exits_zero(tmp_path):
 
 def test_hook_never_fails_on_garbage(tmp_path):
     r = subprocess.run([sys.executable, str(SCRIPT), "hook"], input="not json{",
-                       capture_output=True, text=True,
+                       capture_output=True, text=True, check=False,
                        env={**os.environ, "TOKEN_USAGE_LEDGER_DIR": str(tmp_path)})
     assert r.returncode == 0
 
@@ -146,7 +146,7 @@ def test_subagent_stop_reaggregates_full_session(tmp_path):
     # SubagentStop delivers the subagent's own sidechain transcript; the hook
     # must resolve the owning session and ledger the WHOLE session, not the
     # sidechain alone.
-    main, agent = make_session_with_agent(tmp_path)
+    _main, agent = make_session_with_agent(tmp_path)
     r = run_hook({"session_id": "sess-1", "transcript_path": str(agent),
                   "hook_event_name": "SubagentStop"}, tmp_path)
     assert r.returncode == 0

@@ -1,5 +1,3 @@
-import json
-
 from conftest import assistant, usage, user, write_jsonl
 
 

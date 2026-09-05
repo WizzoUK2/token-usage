@@ -103,7 +103,7 @@ def test_unpriced_models_skips_zero_usage_pseudo_model(tu):
 
 
 def test_report_footnote_for_unpriced_model(tu, tmp_path):
-    from conftest import usage, user, assistant, write_jsonl
+    from conftest import assistant, usage, user, write_jsonl
     t = write_jsonl(tmp_path / "s.jsonl", [
         user("2026-07-01T10:00:00Z", command="/go"),
         assistant("2026-07-01T10:00:05Z", usage(inp=10, out=20),
@@ -116,7 +116,7 @@ def test_report_footnote_for_unpriced_model(tu, tmp_path):
 
 
 def test_no_footnote_when_all_priced(tu, tmp_path):
-    from conftest import usage, user, assistant, write_jsonl
+    from conftest import assistant, usage, user, write_jsonl
     t = write_jsonl(tmp_path / "s.jsonl", [
         user("2026-07-01T10:00:00Z", command="/go"),
         assistant("2026-07-01T10:00:05Z", usage(inp=10, out=20), request_id="r1"),
@@ -127,7 +127,7 @@ def test_no_footnote_when_all_priced(tu, tmp_path):
 
 
 def test_history_collects_unpriced(tu, monkeypatch, tmp_path):
-    from conftest import usage, user, assistant, write_jsonl
+    from conftest import assistant, usage, user, write_jsonl
     monkeypatch.setenv("TOKEN_USAGE_PROJECTS_DIR", str(tmp_path / "projects"))
     monkeypatch.setenv("TOKEN_USAGE_LEDGER_DIR", str(tmp_path / "cache"))
     write_jsonl(tmp_path / "projects" / "proj-a" / "s1.jsonl", [

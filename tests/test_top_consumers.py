@@ -128,3 +128,9 @@ def test_command_mode_flags_partially_priced_labels(tu, tmp_path, monkeypatch, t
     assert rows["/commit"]["partial"] is False
     out = tu.render_top_consumers(data)
     assert "partially priced (some sessions on unpriced models)" in out
+
+
+def test_render_empty_window_names_the_grouping(tu, tmp_path, monkeypatch):
+    seed(tmp_path, monkeypatch)
+    empty_cmds = tu.run_top_consumers(by="command", since="2030-01-01")
+    assert tu.render_top_consumers(empty_cmds) == "No commands in window."

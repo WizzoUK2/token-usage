@@ -707,8 +707,12 @@ def _since_days(arg):
     return int(m.group(1)) if m else None
 
 
-def since_cutoff(arg):
-    """'7d' -> ISO instant 7 days ago; ISO dates pass through; junk errors out."""
+def since_cutoff(arg, flag="--since"):
+    """'7d' -> ISO instant 7 days ago; ISO dates pass through; junk errors out.
+
+    `flag` names the offending input in the error: callers that aren't the CLI
+    (the MCP server) must not tell their users about a "--since" flag they
+    never typed."""
     if not arg:
         return None
     days = _since_days(arg)
@@ -720,7 +724,7 @@ def since_cutoff(arg):
         return arg
     # Anything else would string-compare against ISO timestamps and silently
     # filter out every session — reject loudly instead.
-    sys.exit(f"token-usage: invalid --since value {arg!r} — use Nd (e.g. 7d) or YYYY-MM-DD")
+    sys.exit(f"token-usage: invalid {flag} value {arg!r} — use Nd (e.g. 7d) or YYYY-MM-DD")
 
 
 def _local_day(ts):
@@ -932,7 +936,7 @@ def run_top_consumers(by="session", since="30d", project=None, limit=10, warning
 
 def render_top_consumers(data):
     if not data["rows"]:
-        return "No sessions in window."
+        return "No commands in window." if data["by"] == "command" else "No sessions in window."
     if data["by"] == "session":
         lines = ["| Session | Project | Started | Output | Input | Cache read | Cache write | Est. cost |",
                  "|---|---|---|---:|---:|---:|---:|---:|"]
@@ -1410,7 +1414,7 @@ def run_hook():
                 f"token-usage: session estimate ${cost:.2f} has passed "
                 f"{passed} — top consumer: {top}"}))
 
-    except Exception:
+    except Exception:  # noqa: BLE001 — a hook must never break the session
         return 0  # a broken ledger update must never break the session
     return 0
 

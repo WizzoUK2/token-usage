@@ -2,7 +2,7 @@
 name: report
 description: Generate a per-activity breakdown of Claude Code or Cowork token usage and estimated API cost for the current or a past session, attributing usage to slash commands (Claude Code) or skills (Cowork), including subagent rollups, per-agent-type and per-model breakdowns, cross-session history with burn rate, compare mode, budget nudge status, and rule-based spend insights. This skill should be used when the user asks "where did my tokens go", "token usage report", "how many tokens did that command or skill use", "what did this session cost", "which command/skill/subagent/model used the most tokens", "show me token history", "what did I spend this week", "what's my burn rate", "token history by day/project/command/model", "compare token usage between two sessions", "which sessions cost the most", "costliest sessions", "top consumers", "any tips on my token spend", "analyse my token usage", or "why was this session expensive".
 argument-hint: "[transcript-path]"
-allowed-tools: Bash, Read, mcp__plugin_token-usage_token-usage__session_cost, mcp__plugin_token-usage_token-usage__history, mcp__plugin_token-usage_token-usage__insights, mcp__plugin_token-usage_token-usage__diff, mcp__plugin_token-usage_token-usage__top_consumers
+allowed-tools: Bash, Read, mcp__plugin_token-usage_token-usage__session_cost, mcp__plugin_token-usage_token-usage__history, mcp__plugin_token-usage_token-usage__insights, mcp__plugin_token-usage_token-usage__diff, mcp__plugin_token-usage_token-usage__top_consumers, mcp__token-usage__session_cost, mcp__token-usage__history, mcp__token-usage__insights, mcp__token-usage__diff, mcp__token-usage__top_consumers
 version: 0.6.0
 ---
 
@@ -14,8 +14,10 @@ Produce a per-activity token-usage breakdown for the current Claude Code session
 
 If tools named `mcp__plugin_token-usage_token-usage__session_cost`, `…__history`,
 `…__insights`, `…__diff` or `…__top_consumers` are available in this session, call them
-instead of shelling out — same data, structured result, no path resolution needed. Use
-`format: "markdown"` when the user wants the table shown verbatim. Fall back to the CLI
+instead of shelling out. (Registered by hand with `claude mcp add --scope user` the same
+tools are named `mcp__token-usage__<tool>`; both prefixes are allowed here.) Same data,
+structured result, no path resolution needed. Use `format: "markdown"` when the user
+wants the table shown verbatim. Fall back to the CLI
 below when the tools are absent (e.g. a Cowork sandbox without the server registered).
 
 ## How to run

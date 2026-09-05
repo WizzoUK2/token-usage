@@ -12,10 +12,11 @@ JSON-RPC only; diagnostics go to stderr.
 import json
 import os
 import sys
+import traceback
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import token_usage as tu  # noqa: E402
+import token_usage as tu
 
 SUPPORTED_VERSIONS = ("2024-11-05", "2025-03-26", "2025-06-18")
 LATEST_VERSION = "2025-06-18"
@@ -29,8 +30,11 @@ SESSION_SELECTORS = {
     "session_id": {"type": "string",
                    "description": "Claude Code session id; searched across every project."},
 }
-SINCE = {"type": "string", "description": "Window start: Nd (e.g. 7d) or YYYY-MM-DD."}
-PROJECT = {"type": "string", "description": "Substring filter on the project slug."}
+SINCE = {"type": "string", "minLength": 1,
+         "description": "Window start: Nd (e.g. 7d) or YYYY-MM-DD."}
+PROJECT = {"type": "string", "minLength": 1,
+           "description": "Substring filter on the project slug."}
+INSIGHTS_PROJECT = dict(PROJECT, description=PROJECT["description"] + " Window mode only.")
 
 
 def _schema(properties, required=None):
@@ -63,7 +67,7 @@ TOOLS = [
      "description": "Rule-based findings about token spend. Session mode (default) checks one "
                     "session against the project's 30-day norms; pass since for window mode "
                     "(spend trend, top mover). Pure arithmetic, no LLM.",
-     "inputSchema": _schema(dict(SESSION_SELECTORS, since=SINCE, project=PROJECT,
+     "inputSchema": _schema(dict(SESSION_SELECTORS, since=SINCE, project=INSIGHTS_PROJECT,
                                  budget_usd={"type": "number", "exclusiveMinimum": 0,
                                              "description": "Session budget for the budget-pace "
                                                             "rule (overrides TOKEN_USAGE_BUDGET_USD)."}))},
@@ -120,6 +124,8 @@ def validate_args(schema, args):
             problems.append(f"{key} must be >= {spec['minimum']}")
         if "exclusiveMinimum" in spec and val <= spec["exclusiveMinimum"]:
             problems.append(f"{key} must be > {spec['exclusiveMinimum']}")
+        if "minLength" in spec and len(val) < spec["minLength"]:
+            problems.append(f"{key} must be at least {spec['minLength']} character(s)")
     return problems
 
 
@@ -143,18 +149,31 @@ def call_tool(name, args):
     except ToolError as e:
         return _tool_result(str(e), True)
     except SystemExit as e:  # analyser helpers call sys.exit() with a message
-        return _tool_result(str(e.code), True)
+        # sys.exit(1) leaves an int (or None) behind, whose str() is no
+        # explanation at all — only a non-empty string code is a message.
+        message = e.code if isinstance(e.code, str) and e.code else None
+        return _tool_result(message or f"{name}: exited with status {e.code!r}", True)
     except Exception as e:  # noqa: BLE001 — a tool must not take the server down
+        # The isError text is one line; the traceback behind it goes to stderr,
+        # where the host logs it. The happy path still writes nothing there.
+        traceback.print_exc(file=sys.stderr)
         return _tool_result(f"{type(e).__name__}: {e}", True)
     finally:
         sys.stdout = real_stdout
 
 
+def plugin_manifest_path():
+    return Path(__file__).resolve().parent.parent / ".claude-plugin" / "plugin.json"
+
+
 def plugin_version():
-    manifest = Path(__file__).resolve().parent.parent / ".claude-plugin" / "plugin.json"
+    """Version reported in initialize, or "0" — a manifest problem must not
+    stop the handshake, but it must not pass unmentioned either."""
+    manifest = plugin_manifest_path()
     try:
         return str(json.loads(manifest.read_text()).get("version", "0"))
-    except (OSError, ValueError):
+    except (OSError, ValueError, AttributeError) as e:  # missing, malformed, or not an object
+        print(f"token-usage: cannot read plugin manifest {manifest}: {e}", file=sys.stderr)
         return "0"
 
 
@@ -167,7 +186,11 @@ def _error(id_, code, message):
 
 
 def handle_message(msg):
-    """Route one JSON-RPC message. Returns a response dict, or None for notifications."""
+    """Route one JSON-RPC message. Returns a response dict, or None for notifications.
+
+    One object per message: a JSON-RPC batch (an array of messages) is not
+    supported and comes back as -32600 invalid request, which the 2025-06-18
+    MCP revision removed anyway."""
     if not isinstance(msg, dict) or msg.get("jsonrpc") != "2.0" or not isinstance(msg.get("method"), str):
         return _error(msg.get("id") if isinstance(msg, dict) else None, -32600, "invalid request")
     if "id" not in msg:
@@ -240,6 +263,17 @@ def project_dir_from_env():
 GUESSED_RUNGS = ("cwd", "any_project")
 
 
+def check_since(value, key="since"):
+    """Validate a window value the way the analyser will, but complain in the
+    tool's own vocabulary — an MCP caller never typed a "--since" flag."""
+    if value is None:
+        return
+    try:
+        tu.since_cutoff(value, flag=key)
+    except SystemExit as e:
+        raise ToolError(str(e.code).replace("token-usage: ", "", 1)) from None
+
+
 def pick_transcript(path=None, session_id=None):
     """(transcript, rung) for a session selector, or ToolError saying what was
     tried. Resolution order: see token_usage.locate_transcript_with_source
@@ -248,6 +282,8 @@ def pick_transcript(path=None, session_id=None):
         raise ToolError("transcript must not be blank")
     if session_id is not None and not session_id.strip():
         raise ToolError("session_id must not be blank")
+    if path and session_id:
+        raise ToolError("pass transcript OR session_id, not both")
     project_dir = project_dir_from_env()
     t, via = tu.locate_transcript_with_source(path, session_id=session_id,
                                               project_dir=project_dir)
@@ -269,8 +305,8 @@ def guess_note(transcript, via):
     """Markdown footnotes for a session nobody actually named."""
     if via not in GUESSED_RUNGS:
         return []
-    return [f"Note: no project dir was supplied; this is the newest transcript under "
-            f"{transcript.parent.name}, which may not be the session you meant."]
+    return [("Note: no project dir was supplied; this is the newest transcript under "
+             f"{transcript.parent.name}, which may not be the session you meant.")]
 
 
 def finish(data, render, fmt, warnings, footnotes=()):
@@ -319,6 +355,7 @@ def tool_diff(args):
 
 def tool_history(args):
     warnings = []
+    check_since(args.get("since"))
     data = tu.run_history(by=args.get("by", "project"), since=args.get("since"),
                           project=args.get("project"), warnings=warnings)
     return finish(data, tu.render_history, args.get("format"), warnings)
@@ -330,6 +367,9 @@ def tool_insights(args):
     has_session = args.get("transcript") is not None or args.get("session_id") is not None
     if has_session and args.get("since"):
         raise ToolError("pass a transcript/session_id OR since, not both")
+    if has_session and args.get("project") is not None:
+        raise ToolError("project applies to window mode (with since)")
+    check_since(args.get("since"))
     warnings = []
     budget = args.get("budget_usd")
     if budget is None:
@@ -349,6 +389,7 @@ def tool_insights(args):
 
 def tool_top_consumers(args):
     warnings = []
+    check_since(args.get("since", "30d"))
     data = tu.run_top_consumers(by=args.get("by", "session"), since=args.get("since", "30d"),
                                 project=args.get("project"), limit=args.get("limit", 10),
                                 warnings=warnings)

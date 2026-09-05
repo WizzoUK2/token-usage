@@ -1,5 +1,5 @@
 """Insights engine: baseline, rules, rendering."""
-from conftest import usage, user, assistant, write_jsonl
+from conftest import assistant, usage, user, write_jsonl
 
 
 def _agg(tu, entries, tmp_path, name="x"):
@@ -281,15 +281,16 @@ def test_insights_cli_json(tu, monkeypatch, tmp_path):
            "PATH": "/usr/bin:/bin"}
     out = subprocess.run([sys.executable, str(tu.__file__ if hasattr(tu, "__file__")
                           else "scripts/token_usage.py"), "insights", str(t), "--json"],
-                         capture_output=True, text=True, env=env)
+                         capture_output=True, text=True, env=env, check=False)
     assert out.returncode == 0
     data = jsonlib.loads(out.stdout)
     assert data["mode"] == "session" and isinstance(data["findings"], list)
 
 
 def test_insights_cli_rejects_transcript_plus_since(tu, tmp_path):
-    import subprocess, sys
+    import subprocess
+    import sys
     out = subprocess.run([sys.executable, "scripts/token_usage.py", "insights",
                           str(tmp_path / "x.jsonl"), "--since", "7d"],
-                         capture_output=True, text=True)
+                         capture_output=True, text=True, check=False)
     assert out.returncode != 0 and "--since" in out.stderr
