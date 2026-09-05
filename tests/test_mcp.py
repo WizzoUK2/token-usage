@@ -667,8 +667,15 @@ def test_insights_project_is_window_mode_only(mcp, tmp_path, monkeypatch):
     _proj, _s1, _s2 = seed(tmp_path, monkeypatch)
     text, err = call(mcp, "insights", session_id="bbb-222", project="beta")
     assert err and text == "project applies to window mode (with since)"
+    # project ALONE is the dangerous case: with no session selector it used to
+    # fall into session mode with the filter dropped, answering about whatever
+    # session discovery found -- in another project entirely.
+    text, err = call(mcp, "insights", project="alpha")
+    assert err and text == "project applies to window mode (with since)"
+    text, err = call(mcp, "insights", project="alpha", since="2026-01-01")
+    assert not err                                   # window mode is the way to filter
     assert mcp.SCHEMAS["insights"]["properties"]["project"]["description"].endswith(
-        "Window mode only.")
+        "Window mode only: pass it with since.")
     # The shared PROJECT description is untouched for the tools that filter.
     assert mcp.SCHEMAS["history"]["properties"]["project"] == mcp.PROJECT
 

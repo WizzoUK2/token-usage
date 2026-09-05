@@ -199,7 +199,7 @@ def test_sum_by_day_timestampless_requests_fall_to_first_day(tu, tmp_path):
     assert tu.sum_buckets(next(iter(by_day.values())))["output"] == 150
 
 
-def test_summarize_transcript_has_by_day_and_version_3(tu, monkeypatch, tmp_path):
+def test_summarize_transcript_has_by_day_and_the_current_version(tu, monkeypatch, tmp_path):
     monkeypatch.setenv("TOKEN_USAGE_LEDGER_DIR", str(tmp_path / "cache"))
     t = write_jsonl(tmp_path / "projects" / "p" / "s.jsonl", [
         user("2026-07-01T10:00:00Z"),
@@ -207,7 +207,7 @@ def test_summarize_transcript_has_by_day_and_version_3(tu, monkeypatch, tmp_path
         assistant("2026-07-02T01:00:00Z", usage(inp=10, out=300), request_id="r2"),
     ])
     s = tu.summarize_transcript(t, tu.load_pricing())
-    assert s["version"] == 3
+    assert s["version"] == tu.INDEX_VERSION == 4
     assert len(s["by_day"]) == 2
     assert sum(d["usage"]["output"] for d in s["by_day"].values()) == 400
     assert all(d["cost_usd"] is not None for d in s["by_day"].values())
@@ -233,7 +233,7 @@ def test_v2_index_entry_reparses_once(tu, monkeypatch, tmp_path):
         assistant("2026-07-01T10:00:05Z", usage(out=100), request_id="r1"),
     ])
     s1, hit1 = tu.cached_summary(t, tu.load_pricing())
-    assert not hit1 and s1["version"] == 3
+    assert not hit1 and s1["version"] == tu.INDEX_VERSION
     # forge a stale v2 entry: same mtime/size but version 2 and no by_day
     import hashlib
     import json as j
@@ -243,7 +243,7 @@ def test_v2_index_entry_reparses_once(tu, monkeypatch, tmp_path):
     stale.pop("by_day")
     cache_file.write_text(j.dumps(stale))
     s2, hit2 = tu.cached_summary(t, tu.load_pricing())
-    assert not hit2 and s2["version"] == 3 and "by_day" in s2   # re-parsed
+    assert not hit2 and s2["version"] == tu.INDEX_VERSION and "by_day" in s2  # re-parsed
     _s3, hit3 = tu.cached_summary(t, tu.load_pricing())
     assert hit3                                                  # now cached
 
@@ -342,5 +342,8 @@ def test_window_insights_and_baseline_disclose_skipped_transcripts(tu, tmp_path,
     window = tu.run_insights(since="2026-01-01")
     assert len(window["skipped_transcripts"]) == 1
     assert "1 transcript(s) skipped (unreadable)" in tu.render_insights(window)
+    # The baseline carries the paths, not a count: session-mode insights
+    # footnotes them, and a thinned baseline switches every rule off.
     baseline = tu.compute_baseline(tu.load_pricing(), project="-Users-x-repo-one")
-    assert baseline["skipped_transcripts"] == 1              # a count is enough here
+    assert baseline["skipped_transcripts"] == \
+        [str(proj / "-Users-x-repo-two" / "junk.jsonl")]

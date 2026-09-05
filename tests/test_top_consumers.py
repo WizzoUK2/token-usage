@@ -127,7 +127,29 @@ def test_command_mode_flags_partially_priced_labels(tu, tmp_path, monkeypatch):
     assert rows["/review"]["cost_usd"] == 7.0        # 140k out @ $50/MTok, priced only
     assert rows["/commit"]["partial"] is False
     out = tu.render_top_consumers(data)
-    assert "partially priced (some sessions on unpriced models)" in out
+    assert "partially priced (some of their usage ran on unpriced models)" in out
+
+
+def test_command_mode_flags_a_label_mixing_models_within_one_session(tu, tmp_path, monkeypatch):
+    # Both /mixed turns are in the SAME session, one priced and one not:
+    # cost_usd() prices what it can, so the label's subtotal covers half its
+    # tokens while the whole usage is reported. partial has to say so --
+    # per-session cost_usd is never None here, so it cannot be the signal.
+    proj = seed(tmp_path, monkeypatch)
+    write_jsonl(proj / "-Users-x-one" / "s5.jsonl", [
+        user("2026-06-15T10:00:00Z", command="/mixed"),
+        assistant("2026-06-15T10:00:01Z", usage(out=100_000), request_id="r6"),
+        user("2026-06-15T10:02:00Z", command="/mixed"),
+        assistant("2026-06-15T10:02:01Z", usage(out=100_000),
+                  model="claude-mystery-9", request_id="r7"),
+    ])
+    data = tu.run_top_consumers(by="command", since="2026-01-01")
+    rows = {r["label"]: r for r in data["rows"]}
+    assert rows["/mixed"]["usage"]["output"] == 200_000
+    assert rows["/mixed"]["cost_usd"] == 5.0          # 100k out @ $50/MTok, priced half
+    assert rows["/mixed"]["partial"] is True
+    assert rows["/commit"]["partial"] is False        # wholly priced, untouched
+    assert "2 command(s) partially priced" in tu.render_top_consumers(data)
 
 
 def test_render_empty_window_names_the_grouping(tu, tmp_path, monkeypatch):

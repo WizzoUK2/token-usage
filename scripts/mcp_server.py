@@ -34,7 +34,8 @@ SINCE = {"type": "string", "minLength": 1,
          "description": "Window start: Nd (e.g. 7d) or YYYY-MM-DD."}
 PROJECT = {"type": "string", "minLength": 1,
            "description": "Substring filter on the project slug."}
-INSIGHTS_PROJECT = dict(PROJECT, description=PROJECT["description"] + " Window mode only.")
+INSIGHTS_PROJECT = dict(PROJECT, description=PROJECT["description"]
+                        + " Window mode only: pass it with since.")
 
 
 def _schema(properties, required=None):
@@ -368,7 +369,10 @@ def tool_insights(args):
     has_session = args.get("transcript") is not None or args.get("session_id") is not None
     if has_session and args.get("since"):
         raise ToolError("pass a transcript/session_id OR since, not both")
-    if has_session and args.get("project") is not None:
+    # project filters the window scan and nothing else: session mode has no
+    # use for it, so accepting it there would answer about a session picked by
+    # discovery -- quite possibly in another project.
+    if args.get("project") is not None and not args.get("since"):
         raise ToolError("project applies to window mode (with since)")
     check_since(args.get("since"))
     warnings = []

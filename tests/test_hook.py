@@ -203,3 +203,25 @@ def test_hook_recovers_from_non_dict_ledger(tmp_path):
     assert r.returncode == 0
     ledger = json.loads((ledger_dir / "bud-4.json").read_text())
     assert ledger["total"]["usage"]["output"] == 1000      # ledger self-healed
+
+
+def test_hook_reports_a_failed_ledger_write(tmp_path):
+    # The nudge is the plugin's headline feature; an unwritable cache dir used
+    # to kill it with zero output on any channel. stderr is free (the hook's
+    # contract is stdout + exit status), so say what broke.
+    if os.geteuid() == 0:
+        import pytest
+        pytest.skip("root ignores directory permissions")
+    t = make_transcript(tmp_path, out_tokens=1_000_000)          # ≈ $50
+    ro = tmp_path / "readonly"
+    ro.mkdir()
+    ro.chmod(0o500)
+    try:
+        r = run_hook({"session_id": "ro-1", "transcript_path": str(t)}, tmp_path,
+                     {"TOKEN_USAGE_LEDGER_DIR": str(ro / "ledger"),
+                      "TOKEN_USAGE_BUDGET_USD": "10"})
+    finally:
+        ro.chmod(0o700)
+    assert r.returncode == 0                                     # never break the session
+    assert r.stdout.strip() == ""                                # stdout stays hook protocol
+    assert "hook: ledger update failed" in r.stderr

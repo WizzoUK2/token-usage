@@ -616,7 +616,7 @@ def render_diff(d):
     return "\n".join(lines)
 
 
-INDEX_VERSION = 3
+INDEX_VERSION = 4
 
 
 def projects_dir():
@@ -654,8 +654,12 @@ def summarize_transcript(path, pricing, st=None):
         "pricing": pricing_fingerprint(pricing),
         "project": path.parent.name,
         "first_ts": next((s["start_ts"] for s in segs if s["start_ts"]), None),
+        # "unpriced": this label used at least one model with no rates, so
+        # its cost_usd covers only part of its usage (v4 of the index; a
+        # per-session cost is not enough to spot mixing inside one label).
         "by_label": {label: {"usage": agg["usage"], "cost_usd": agg["cost_usd"],
-                             "invocations": agg["invocations"]}
+                             "invocations": agg["invocations"],
+                             "unpriced": bool(unpriced_models(agg["by_model"], pricing))}
                      for label, agg in data["by_label"].items()},
         "by_model": data["total"]["by_model"],
         "total": {"usage": data["total"]["usage"],
@@ -914,11 +918,13 @@ def run_top_consumers(by="session", since="30d", project=None, limit=10, warning
             c["invocations"] += agg["invocations"]
             for k in c["usage"]:
                 c["usage"][k] += agg["usage"].get(k, 0)
-            if agg["cost_usd"] is None:
+            if agg["cost_usd"] is None or agg.get("unpriced"):
                 # The label's usage is complete but its cost is a priced
                 # subtotal — say so rather than quietly understating it.
+                # Either the whole segment was unpriced (cost_usd None) or it
+                # mixed priced and unpriced models inside one session.
                 c["partial"] = True
-            else:
+            if agg["cost_usd"] is not None:
                 c["cost_usd"] = (c["cost_usd"] or 0.0) + agg["cost_usd"]
     rows = sessions if by == "session" else list(commands.values())
     key = "session_id" if by == "session" else "label"
@@ -962,7 +968,7 @@ def render_top_consumers(data):
         partial = sum(1 for r in data["rows"] if r.get("partial"))
         if partial:
             notes.append(f"{partial} command(s) partially priced "
-                         "(some sessions on unpriced models).")
+                         "(some of their usage ran on unpriced models).")
     for note in notes:
         if note:
             lines += ["", note]
@@ -1007,7 +1013,11 @@ def _median(xs):
 def compute_baseline(pricing, project, days=30, exclude=None):
     """Per-project norms from the history index (median session cost; per-command
     median cost and cache-read ratio) over the trailing `days`, excluding the
-    transcript at `exclude` (the session being analysed)."""
+    transcript at `exclude` (the session being analysed).
+
+    `skipped_transcripts` lists the paths the scan could not read: every
+    baseline rule goes quiet below INSIGHT_MIN_BASELINE_SESSIONS, so a thinned
+    corpus and a genuinely unremarkable session look identical without them."""
     cutoff = since_cutoff(f"{days}d")
     session_costs, commands, skipped = [], {}, []
     for s in iter_summaries(pricing, cutoff=cutoff, exclude=exclude, skipped=skipped):
@@ -1024,7 +1034,7 @@ def compute_baseline(pricing, project, days=30, exclude=None):
                 c["ratios"].append(r)
     return {
         "sessions": len(session_costs),
-        "skipped_transcripts": len(skipped),
+        "skipped_transcripts": skipped,
         "median_session_cost": _median(session_costs),
         "commands": {label: {"sessions": len(c["costs"]),
                              "median_cost": _median(c["costs"]),
@@ -1187,9 +1197,14 @@ def run_insights(transcript=None, since=None, project=None, budget=None, warning
     t = resolve_transcript(transcript)
     data = aggregate(parse_session(t), pricing)
     baseline = compute_baseline(pricing, project=t.parent.name, exclude=str(t))
+    # One canonical top-level key in both modes: render_insights footnotes it,
+    # and a session-mode reader needs it most -- the baseline scan is the only
+    # thing that makes session mode say anything at all.
+    skipped = baseline.pop("skipped_transcripts")
     return {"mode": "session",
             "findings": session_insights(data, baseline, budget=budget),
             "baseline": baseline,
+            "skipped_transcripts": skipped,
             "transcript_path": str(t)}
 
 
@@ -1413,7 +1428,10 @@ def run_hook():
                 f"token-usage: session estimate ${cost:.2f} has passed "
                 f"{passed} — top consumer: {top}"}))
 
-    except Exception:  # noqa: BLE001 — a hook must never break the session
+    except Exception as e:  # noqa: BLE001 — a hook must never break the session
+        # stdout is the hook protocol, so the only channel left is stderr:
+        # silence here means the budget nudge is dead with no way to find out.
+        warn(f"hook: ledger update failed: {e}")
         return 0  # a broken ledger update must never break the session
     return 0
 
@@ -1464,6 +1482,10 @@ def main():
     if args.cmd == "insights":
         if args.transcript and args.since:
             sys.exit("token-usage: pass a transcript OR --since, not both")
+        if args.project is not None and not args.since:
+            # Session mode has no project filter to apply; accepting one would
+            # silently report on whatever session discovery found instead.
+            sys.exit("token-usage: --project applies to window mode (use --since)")
         budget = budget_from_env()
         result = run_insights(transcript=args.transcript, since=args.since,
                               project=args.project, budget=budget)

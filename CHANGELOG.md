@@ -37,7 +37,9 @@ adheres to [Semantic Versioning](https://semver.org/).
   `--since`, `--project`, `--limit`, `--json`. Unpriced rows sort last and are
   disclosed: session mode reports `unpriced_rows` for the window (with a
   footnote when `--limit` cut any of them), and command mode marks a label
-  `"partial": true` when some of its sessions ran on unpriced models, so a
+  `"partial": true` whenever any of its usage ran on an unpriced model —
+  including a single session that mixed a priced and an unpriced model under
+  one label, where the per-session cost is a number and hides the gap — so a
   priced subtotal is never mistaken for the whole cost.
 - **Session-id lookup** — `locate_transcript()` resolves a Claude Code session
   id across every project; `resolve_transcript()` now fails cleanly on a
@@ -83,8 +85,8 @@ adheres to [Semantic Versioning](https://semver.org/).
   window value now reads `invalid since value …` (the CLI still says
   `--since`); `since`/`project` reject the empty string; `budget_usd` must be
   greater than 0; `transcript` and `session_id` together, and `project`
-  alongside a session selector on `insights`, are rejected instead of one
-  silently winning; and a float where an integer is required reads
+  without `since` on `insights` (window mode is the only mode that filters by
+  project), are rejected instead of one silently winning; and a float where an integer is required reads
   `limit must be an integer`. A handler that exits without a message reports
   `<tool>: exited with status <code>` and an unexpected exception now leaves a
   traceback on stderr for the host log.
@@ -109,8 +111,20 @@ adheres to [Semantic Versioning](https://semver.org/).
   unreadable transcript disappeared the same way. Cache-write failures now
   warn once per process and the freshly parsed summary is used anyway, and an
   unreadable transcript is warned about on stderr, listed as
-  `skipped_transcripts` in the JSON (a count in the `insights` baseline) and
-  footnoted in the markdown.
+  `skipped_transcripts` in the JSON — at the top level in both `insights`
+  modes, since a thinned baseline silently switches every session-mode rule
+  off — and footnoted in the markdown.
+- **`insights --project` without `--since` is an error, not a silent
+  no-op.** `insights --project other` (and the MCP `insights
+  {"project": …}`) took the session-mode path with the filter dropped, so it
+  answered about whatever session discovery found, quite possibly in another
+  project, with no warning. Both now say `--project applies to window mode
+  (use --since)`.
+- **The Stop hook says when it could not write the ledger.** An unwritable
+  `TOKEN_USAGE_LEDGER_DIR` / `~/.cache/token-usage` (read-only home, a
+  root-owned directory, a full disk) killed the budget nudge with no output
+  on any channel; the hook now warns on stderr
+  (`token-usage: hook: ledger update failed: …`) and still exits 0.
 - **A broken `TOKEN_USAGE_TRANSCRIPT` is diagnosed by name.** Both the CLI and
   the MCP server used to answer "no transcript found"; they now say
   `TOKEN_USAGE_TRANSCRIPT is set to <path> but that file does not exist`.
@@ -120,7 +134,9 @@ adheres to [Semantic Versioning](https://semver.org/).
   `insights` 30-day baseline kept pricing old rates until a transcript
   changed. Entries now also carry a fingerprint of the effective pricing
   table (bundled + overlay) and re-parse when it differs. Expect a one-off
-  full re-scan on first run after upgrading.
+  full re-scan on first run after upgrading — `INDEX_VERSION` is also 3→4 in
+  this release, so per-label entries can record whether any of their usage was
+  unpriced.
 
 ## [0.5.0] — 2026-07-09
 

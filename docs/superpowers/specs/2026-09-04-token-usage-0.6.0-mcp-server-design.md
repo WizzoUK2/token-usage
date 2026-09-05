@@ -133,7 +133,7 @@ JSON: `run_history()` output. Markdown: `render_history()`.
 | Arg | Type | Notes |
 |---|---|---|
 | `transcript`, `session_id` | string | session mode (default: current session) |
-| `since`, `project` | string | window mode; `since` present ⇒ window mode |
+| `since`, `project` | string | window mode; `since` present ⇒ window mode. `project` without `since` is an error (session mode has nothing to filter) |
 | `budget_usd` | number | overrides `TOKEN_USAGE_BUDGET_USD` for this call |
 | `format` | enum | |
 

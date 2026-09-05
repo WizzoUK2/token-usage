@@ -257,6 +257,35 @@ def test_run_insights_session_mode(tu, monkeypatch, tmp_path):
     assert r["baseline"]["sessions"] == 5
 
 
+def test_session_mode_discloses_unreadable_baseline_transcripts(tu, monkeypatch, tmp_path):
+    # Session mode is entirely baseline-driven: transcripts the corpus scan
+    # cannot read thin the baseline out, and below
+    # INSIGHT_MIN_BASELINE_SESSIONS every baseline rule stops firing. "No
+    # notable findings" then means "we could not look" -- say which files.
+    monkeypatch.setenv("TOKEN_USAGE_PROJECTS_DIR", str(tmp_path / "projects"))
+    monkeypatch.setenv("TOKEN_USAGE_LEDGER_DIR", str(tmp_path / "cache"))
+    from datetime import datetime, timedelta, timezone
+    ts = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    for i in range(5):
+        _session(tmp_path, f"s{i}", 2000, ts=ts)
+    current = _session(tmp_path, "current", 70000, ts=ts)
+    assert tu.run_insights(transcript=current)["findings"]      # baseline intact
+    broken = []
+    for name in ("s0", "s1"):                                   # unreadable: directories
+        f = tmp_path / "projects" / "p" / f"{name}.jsonl"
+        f.unlink()
+        f.mkdir()
+        broken.append(str(f))
+    r = tu.run_insights(transcript=current)
+    assert r["findings"] == []                                  # baseline now too thin
+    assert r["baseline"]["sessions"] == 3
+    assert sorted(r["skipped_transcripts"]) == sorted(broken)
+    out = tu.render_insights(r)
+    assert out.startswith("No notable findings. (session: p/current.jsonl)")
+    assert "2 transcript(s) skipped (unreadable)" in out
+    assert broken[0] in out
+
+
 def test_run_insights_window_mode(tu, monkeypatch, tmp_path):
     monkeypatch.setenv("TOKEN_USAGE_PROJECTS_DIR", str(tmp_path / "projects"))
     monkeypatch.setenv("TOKEN_USAGE_LEDGER_DIR", str(tmp_path / "cache"))
@@ -294,3 +323,14 @@ def test_insights_cli_rejects_transcript_plus_since(tu, tmp_path):
                           str(tmp_path / "x.jsonl"), "--since", "7d"],
                          capture_output=True, text=True, check=False)
     assert out.returncode != 0 and "--since" in out.stderr
+
+
+def test_insights_cli_rejects_project_without_since(tu, tmp_path):
+    # --project only filters the window scan; in session mode it was dropped
+    # in silence, so `insights --project alpha` reported on whichever session
+    # discovery happened to find.
+    out = subprocess.run([sys.executable, "scripts/token_usage.py", "insights",
+                          "--project", "alpha"],
+                         capture_output=True, text=True, check=False)
+    assert out.returncode != 0
+    assert "--project applies to window mode (use --since)" in out.stderr
