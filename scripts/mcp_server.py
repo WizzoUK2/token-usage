@@ -295,7 +295,7 @@ def pick_transcript(path=None, session_id=None):
     if via == "session_id":
         raise ToolError(f"no transcript for session id {session_id!r} under {tu.projects_dir()}")
     if via == "env":
-        raise ToolError(f"TOKEN_USAGE_TRANSCRIPT is set to "
+        raise ToolError("TOKEN_USAGE_TRANSCRIPT is set to "
                         f"{os.environ.get('TOKEN_USAGE_TRANSCRIPT')} "
                         "but that file does not exist")
     where = f"{tu.projects_dir()}" + (f" (project dir {project_dir})" if project_dir else "")

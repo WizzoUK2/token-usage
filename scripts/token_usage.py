@@ -696,8 +696,7 @@ def cached_summary(path, pricing):
     except OSError as e:
         if not _CACHE_WRITE_WARNED:
             _CACHE_WRITE_WARNED = True
-            print(f"token-usage: cannot write summary cache {index_dir()}: {e}",
-                  file=sys.stderr)
+            warn(f"cannot write summary cache {index_dir()}: {e}")
     return s, False
 
 
@@ -764,7 +763,7 @@ def iter_summaries(pricing, cutoff=None, project=None, exclude=None, progress=Fa
         except (OSError, ValueError, AttributeError) as e:
             # OSError: unreadable/a directory. ValueError: UnicodeDecodeError
             # and malformed JSON. AttributeError: a cache entry of the wrong shape.
-            print(f"token-usage: skipping unreadable transcript {f}: {e}", file=sys.stderr)
+            warn(f"skipping unreadable transcript {f}: {e}")
             if skipped is not None:
                 skipped.append(str(f))
             continue
