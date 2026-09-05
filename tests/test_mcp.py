@@ -770,3 +770,61 @@ def test_server_survives_undecodable_stdin_bytes(tmp_path, monkeypatch):
     replies = [json.loads(line) for line in r.stdout.decode().splitlines()]
     assert [m.get("id") for m in replies if "result" in m] == [1, 2]
     assert [m["error"]["code"] for m in replies if "error" in m] == [-32700]
+
+
+def test_non_finite_numbers_are_rejected(mcp, tmp_path, monkeypatch):
+    # validate_args compared with <=, which is False for NaN, so
+    # {"budget_usd": NaN} ran the tool with the budget-pace rule silently
+    # disabled: the caller asked for a budget check and got neither the check
+    # nor a complaint.
+    seed(tmp_path, monkeypatch)
+    for literal in ("NaN", "Infinity", "-Infinity"):
+        msg = json.loads('{"jsonrpc": "2.0", "id": 1, "method": "tools/call", '
+                         '"params": {"name": "insights", "arguments": '
+                         '{"session_id": "bbb-222", "budget_usd": ' + literal + "}}}")
+        res = mcp.handle_message(msg)["result"]
+        assert res["isError"] is True, literal
+        assert "budget_usd must be a finite number" in res["content"][0]["text"], literal
+    schema = {"type": "object", "additionalProperties": False,
+              "properties": {"n": {"type": "number", "exclusiveMinimum": 0},
+                             "i": {"type": "integer", "minimum": 1}}}
+    assert mcp.validate_args(schema, {"n": float("nan")}) == ["n must be a finite number"]
+    assert mcp.validate_args(schema, {"i": 10 ** 400}) == []      # a real (huge) integer
+    assert mcp.validate_args(schema, {"n": 2.5, "i": 3}) == []
+
+
+def test_non_object_arguments_are_a_protocol_error(mcp, tmp_path, monkeypatch):
+    # params.get("arguments") or {} coerced []/0/""/false into {}, so a
+    # malformed call answered about a session discovery guessed at instead of
+    # reporting the malformed call.
+    seed(tmp_path, monkeypatch)
+    for bad in ([], 0, "", False, [1], "x", 1.5, True):
+        r = mcp.handle_message(req("tools/call", name="session_cost", arguments=bad))
+        assert "result" not in r, bad
+        assert r["error"]["code"] == -32602, bad
+        assert "arguments must be an object" in r["error"]["message"], bad
+    # A missing (or explicitly null) arguments is the client saying "no
+    # arguments", which is a legitimate call.
+    for msg in (req("tools/call", name="history"),
+                req("tools/call", name="history", arguments=None)):
+        r = mcp.handle_message(msg)
+        assert r["result"]["isError"] is False
+
+
+def test_missing_projects_root_reaches_mcp_warnings(mcp, tmp_path, monkeypatch):
+    monkeypatch.setenv("TOKEN_USAGE_PROJECTS_DIR", str(tmp_path / "nope"))
+    monkeypatch.setenv("TOKEN_USAGE_LEDGER_DIR", str(tmp_path / "cache"))
+    text, err = call(mcp, "history")
+    assert not err
+    data = json.loads(text)
+    assert data["projects_dir_missing"] == str(tmp_path / "nope")
+    assert data["warnings"] == [f"no Claude Code projects directory at {tmp_path / 'nope'}"]
+    md, _err = call(mcp, "top_consumers", format="markdown")
+    assert f"No Claude Code projects directory at {tmp_path / 'nope'}" in md
+    assert f"Warning: no Claude Code projects directory at {tmp_path / 'nope'}" in md
+
+
+def test_check_since_rejects_a_calendar_invalid_date(mcp, tmp_path, monkeypatch):
+    seed(tmp_path, monkeypatch)
+    text, err = call(mcp, "history", since="2026-09-31")
+    assert err and text == "invalid since value '2026-09-31' — use Nd (e.g. 7d) or YYYY-MM-DD"

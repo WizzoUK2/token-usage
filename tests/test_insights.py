@@ -402,7 +402,11 @@ def test_window_mode_empty_scan_says_nothing_was_scanned(tu, monkeypatch, tmp_pa
     monkeypatch.setenv("TOKEN_USAGE_LEDGER_DIR", str(tmp_path / "cache"))
     r = tu.run_insights(since="7d")
     assert r["baseline"]["sessions"] == 0 and r["findings"] == []
-    assert tu.render_insights(r) == "No sessions in window — nothing was scanned."
+    # ...and when the reason is that there is no corpus at all, say so: an
+    # empty scan of a real projects dir and a mistyped one read identically.
+    assert tu.render_insights(r) == (
+        "No sessions in window — nothing was scanned.\n\n"
+        f"No Claude Code projects directory at {tmp_path / 'nope'} — nothing was scanned.")
 
     monkeypatch.setenv("TOKEN_USAGE_PROJECTS_DIR", str(tmp_path / "projects"))
     _session(tmp_path, "s0", 2000)

@@ -173,3 +173,43 @@ def test_budget_from_env_warns_about_junk(tu, monkeypatch, capsys):
     assert "not a number" in capsys.readouterr().err
     monkeypatch.setenv("TOKEN_USAGE_BUDGET_USD", "12.5")
     assert tu.budget_from_env() == 12.5
+
+
+def test_non_finite_and_negative_rates_are_rejected(tu, monkeypatch, tmp_path, capsys):
+    # json.loads accepts the bare NaN/Infinity literals, and 1e400 overflows to
+    # inf: an overlay carrying one used to poison every cost — a "cost_usd": NaN
+    # in the MCP json payload (not RFC-8259 JSON, unparseable by a strict
+    # client) and in the Stop-hook ledger, and int(cost // limit) raising on
+    # every Stop, which killed the budget nudge behind one stderr line.
+    p = tmp_path / "cfg" / "token-usage" / "pricing.json"
+    p.parent.mkdir(parents=True)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+    for raw in ("NaN", "Infinity", "-Infinity", "1e400", "-1000", "-0.5"):
+        p.write_text('{"claude-sonnet-4-5": {"input": ' + raw + ', "output": 15.0}}')
+        warnings = []
+        pricing = tu.load_pricing(warnings)
+        assert pricing["claude-sonnet-4-5"] == {"input": 3.0, "output": 15.0}, raw
+        assert warnings == [("ignoring invalid rates for claude-sonnet-4-5 in "
+                             f"{tu.user_pricing_path()}")], raw
+        capsys.readouterr()
+    # A huge integer literal is a float overflow away from inf, and 0 is a
+    # legitimate free-tier rate.
+    p.write_text('{"claude-sonnet-4-5": {"input": ' + "9" * 400 + ', "output": 0}}')
+    warnings = []
+    assert tu.load_pricing(warnings)["claude-sonnet-4-5"] == {"input": 3.0, "output": 15.0}
+    assert warnings and "claude-sonnet-4-5" in warnings[0]
+    p.write_text('{"claude-sonnet-4-5": {"input": 0, "output": 0.0}}')
+    assert tu.load_pricing()["claude-sonnet-4-5"] == {"input": 0, "output": 0.0}
+    capsys.readouterr()
+
+
+def test_costs_stay_json_serialisable_with_a_poisoned_overlay(tu, monkeypatch, tmp_path, capsys):
+    p = tmp_path / "cfg" / "token-usage" / "pricing.json"
+    p.parent.mkdir(parents=True)
+    p.write_text('{"claude-fable-5": {"input": NaN, "output": NaN}}')
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+    pricing = tu.load_pricing()
+    cost = tu.cost_usd({"claude-fable-5": dict(tu.empty_usage(), output=1_000_000)}, pricing)
+    assert cost == 50.0
+    assert json.loads(json.dumps({"cost_usd": cost}, allow_nan=False))["cost_usd"] == 50.0
+    capsys.readouterr()

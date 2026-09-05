@@ -347,3 +347,117 @@ def test_window_insights_and_baseline_disclose_skipped_transcripts(tu, tmp_path,
     baseline = tu.compute_baseline(tu.load_pricing(), project="-Users-x-repo-one")
     assert baseline["skipped_transcripts"] == \
         [str(proj / "-Users-x-repo-two" / "junk.jsonl")]
+
+
+def test_missing_projects_root_is_disclosed_not_an_empty_table(tu, tmp_path, monkeypatch, capsys):
+    # Path.glob() on a missing path — or on a regular file — yields nothing
+    # rather than raising, so the whole corpus scan reported a clean,
+    # successful, empty result: a mistyped TOKEN_USAGE_PROJECTS_DIR, an MCP
+    # server started with a different HOME or a sandbox mount answered "what
+    # did I spend this week" with a zero table and no signal at all.
+    monkeypatch.setenv("TOKEN_USAGE_LEDGER_DIR", str(tmp_path / "cache"))
+    missing = tmp_path / "nope"
+    a_file = tmp_path / "afile"
+    a_file.write_text("not a directory")
+    for root in (missing, a_file):
+        monkeypatch.setenv("TOKEN_USAGE_PROJECTS_DIR", str(root))
+        hist = tu.run_history(by="project")
+        assert hist["rows"] == [] and hist["projects_dir_missing"] == str(root)
+        assert f"No Claude Code projects directory at {root}" in tu.render_history(hist)
+        top = tu.run_top_consumers(since="30d")
+        assert top["rows"] == [] and top["projects_dir_missing"] == str(root)
+        assert f"No Claude Code projects directory at {root}" in tu.render_top_consumers(top)
+        window = tu.run_insights(since="30d")
+        assert window["projects_dir_missing"] == str(root)
+        assert f"No Claude Code projects directory at {root}" in tu.render_insights(window)
+        assert "no Claude Code projects directory" in capsys.readouterr().err
+        warnings = []
+        tu.run_history(by="project", warnings=warnings)
+        assert warnings == [f"no Claude Code projects directory at {root}"]
+        capsys.readouterr()
+
+
+def test_missing_projects_root_reaches_session_mode_insights(tu, tmp_path, monkeypatch, capsys):
+    # Session mode's only corpus scan is the baseline: with no projects root
+    # every baseline rule goes quiet, which is indistinguishable from an
+    # unremarkable session unless the scan says what it could not read.
+    t = write_jsonl(tmp_path / "proj" / "s.jsonl", [
+        user("2026-06-10T10:00:00Z", command="/review"),
+        assistant("2026-06-10T10:00:01Z", usage(out=100), request_id="r1"),
+    ])
+    monkeypatch.setenv("TOKEN_USAGE_PROJECTS_DIR", str(tmp_path / "nope"))
+    monkeypatch.setenv("TOKEN_USAGE_LEDGER_DIR", str(tmp_path / "cache"))
+    r = tu.run_insights(transcript=str(t))
+    assert r["projects_dir_missing"] == str(tmp_path / "nope")
+    assert f"No Claude Code projects directory at {tmp_path / 'nope'}" in tu.render_insights(r)
+    capsys.readouterr()
+
+
+def test_unwritable_cache_warning_reaches_a_warnings_list(tu, tmp_path, monkeypatch, capsys):
+    # A permanently unwritable cache dir makes every MCP query re-parse the
+    # whole corpus; stderr is invisible to an MCP caller, and the
+    # once-per-process suppression means a long-lived server prints it exactly
+    # once ever. The warnings list is the channel that reaches the caller.
+    import os as _os
+    if _os.geteuid() == 0:
+        import pytest as _pytest
+        _pytest.skip("root ignores directory permissions")
+    seed_projects(tmp_path, monkeypatch)
+    cache = tmp_path / "cache"
+    cache.mkdir(parents=True, exist_ok=True)
+    cache.chmod(0o500)
+    monkeypatch.setattr(tu, "_CACHE_WRITE_WARNED", False)
+    warnings = []
+    try:
+        tu.run_history(by="project", warnings=warnings)
+    finally:
+        cache.chmod(0o700)
+    assert [w for w in warnings if "cannot write summary cache" in w] == \
+        [w for w in warnings if "cannot write summary cache" in w][:1]   # once, not per file
+    assert any("cannot write summary cache" in w for w in warnings)
+    assert capsys.readouterr().err.count("cannot write summary cache") == 1
+
+
+def test_since_rejects_calendar_invalid_dates(tu):
+    import pytest
+    # The shape check let 31 September through, and window_halves then called
+    # datetime.fromisoformat on it: `insights --since 2026-09-31` exited 1 with
+    # a raw ValueError traceback, while `history --since` took the same value
+    # and silently filtered everything out.
+    for bad in ("2026-09-31", "2026-02-30", "2025-02-29", "2026-13-45",
+                "0000-00-00", "2026-09-01 lunchtime", "2026-09-01Tnope",
+                "2026-09-01T25:00:00Z"):
+        with pytest.raises(SystemExit) as e:
+            tu.since_cutoff(bad)
+        assert f"invalid --since value {bad!r}" in str(e.value), bad
+    for good in ("2026-09-01", "2028-02-29", "2026-09-01T10:00:00Z",
+                 "2026-09-01 10:00:00", "2026-09-01T10:00:00+01:00"):
+        assert tu.since_cutoff(good) == good, good
+
+
+def test_insights_since_typo_is_an_error_not_a_traceback(tmp_path, monkeypatch):
+    import subprocess
+    import sys
+
+    from conftest import SCRIPT
+    env = {**os.environ, "TOKEN_USAGE_PROJECTS_DIR": str(tmp_path / "projects"),
+           "TOKEN_USAGE_LEDGER_DIR": str(tmp_path / "cache")}
+    r = subprocess.run([sys.executable, str(SCRIPT), "insights", "--since", "2026-09-31"],
+                       capture_output=True, text=True, env=env, check=False)
+    assert r.returncode == 1
+    assert "Traceback" not in r.stderr
+    assert "invalid --since value '2026-09-31'" in r.stderr
+
+
+def test_non_positive_budget_env_is_reported(tu, monkeypatch):
+    # A budget of 0 (or a negative one, or NaN) parsed fine and then silently
+    # switched the hook's nudge and insights rule 6 off — the user believes
+    # budget monitoring is armed and never hears from it.
+    for raw in ("0", "0.0", "-10", "nan", "-inf"):
+        monkeypatch.setenv("TOKEN_USAGE_BUDGET_USD", raw)
+        warnings = []
+        assert tu.budget_from_env(warnings) is None, raw
+        assert warnings == [f"ignoring TOKEN_USAGE_BUDGET_USD={raw!r} — must be > 0"], raw
+    monkeypatch.setenv("TOKEN_USAGE_BUDGET_USD", "10")
+    warnings = []
+    assert tu.budget_from_env(warnings) == 10.0 and warnings == []

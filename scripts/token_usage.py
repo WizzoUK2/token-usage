@@ -71,7 +71,18 @@ def user_pricing_path():
 
 
 def _is_rate(x):
-    return isinstance(x, (int, float)) and not isinstance(x, bool)
+    """A usable $/MTok rate: a real, finite, non-negative number.
+
+    NaN/Infinity (json.loads accepts the bare literals, and 1e400 overflows to
+    inf) would poison every cost downstream — a `"cost_usd": NaN` is not
+    RFC-8259 JSON, and int(cost // limit) raises — and a negative rate silently
+    pays the user back. 0 is allowed: free tiers exist."""
+    if not isinstance(x, (int, float)) or isinstance(x, bool):
+        return False
+    try:
+        return math.isfinite(x) and x >= 0
+    except OverflowError:   # an int too large to be a float rate
+        return False
 
 
 def _valid_rates(v):
@@ -630,6 +641,29 @@ def projects_dir():
                                Path.home() / ".claude" / "projects"))
 
 
+def check_projects_root(warnings=None):
+    """The projects root as a string when it is NOT a readable directory
+    (missing, a regular file, a stale mount), else None.
+
+    Path.glob() on a non-existent path or a file yields nothing rather than
+    raising, so a mistyped TOKEN_USAGE_PROJECTS_DIR, an MCP server started
+    with a different HOME or an unmounted sandbox made the whole corpus scan
+    report a clean, successful, empty result. "There is nothing here to read"
+    is not the same answer as "you spent nothing"."""
+    root = projects_dir()
+    if root.is_dir():
+        return None
+    warn(f"no Claude Code projects directory at {root}", warnings)
+    return str(root)
+
+
+def projects_dir_footnote(path):
+    """Markdown footnote for a corpus scan that had no projects root to read."""
+    if not path:
+        return None
+    return f"No Claude Code projects directory at {path} — nothing was scanned."
+
+
 def index_dir():
     return Path(os.environ.get("TOKEN_USAGE_LEDGER_DIR",
                                Path.home() / ".cache" / "token-usage")) / "index"
@@ -679,7 +713,7 @@ def summarize_transcript(path, pricing, st=None):
 _CACHE_WRITE_WARNED = False
 
 
-def cached_summary(path, pricing):
+def cached_summary(path, pricing, warnings=None):
     import hashlib
     global _CACHE_WRITE_WARNED
     cache_file = index_dir() / (hashlib.sha1(str(path).encode()).hexdigest() + ".json")
@@ -704,9 +738,15 @@ def cached_summary(path, pricing):
         tmp.write_text(json.dumps(s), encoding="utf-8")
         tmp.replace(cache_file)
     except OSError as e:
+        # Once per process on stderr, but every caller's `warnings` list gets
+        # it: an MCP caller never sees stderr, and a long-lived server would
+        # otherwise re-parse the whole corpus on every query in silence.
+        message = f"cannot write summary cache {index_dir()}: {e}"
         if not _CACHE_WRITE_WARNED:
             _CACHE_WRITE_WARNED = True
-            warn(f"cannot write summary cache {index_dir()}: {e}")
+            warn(message, warnings)
+        elif warnings is not None and message not in warnings:
+            warnings.append(message)
     return s, False
 
 
@@ -729,11 +769,28 @@ def since_cutoff(arg, flag="--since"):
         from datetime import datetime, timedelta, timezone
         return (datetime.now(timezone.utc)
                 - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    if re.fullmatch(r"\d{4}-\d{2}-\d{2}([T ].*)?", arg):
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}([T ].*)?", arg) and _is_calendar_date(arg):
         return arg
     # Anything else would string-compare against ISO timestamps and silently
     # filter out every session — reject loudly instead.
     sys.exit(f"token-usage: invalid {flag} value {arg!r} — use Nd (e.g. 7d) or YYYY-MM-DD")
+
+
+def _is_calendar_date(arg):
+    """True when `arg` is a real instant, not just the right shape.
+
+    The shape check alone let 31 September through, and window_halves' call to
+    datetime.fromisoformat then turned an insights window into a ValueError
+    traceback while `history` took the same value and silently matched
+    nothing."""
+    from datetime import datetime
+    try:
+        datetime.strptime(arg[:10], "%Y-%m-%d")  # noqa: DTZ007 — a date, not an instant
+        if len(arg) > 10:
+            datetime.fromisoformat(arg.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    return True
 
 
 def _local_day(ts):
@@ -748,7 +805,7 @@ def _local_day(ts):
 
 
 def iter_summaries(pricing, cutoff=None, project=None, exclude=None, progress=False,
-                   skipped=None):
+                   skipped=None, warnings=None):
     """Yield cached_summary() results for every transcript under projects_dir(),
     applying the filters shared by every caller that scans the whole corpus:
     an optional `cutoff` (skip sessions starting before it), an optional
@@ -765,11 +822,14 @@ def iter_summaries(pricing, cutoff=None, project=None, exclude=None, progress=Fa
     A transcript that cannot be read or parsed is skipped with a stderr
     warning and its path appended to `skipped` when a list is given — an
     empty table is otherwise indistinguishable from "you spent nothing".
+    `warnings` travels to cached_summary so an unwritable cache dir reaches
+    MCP callers too; callers disclose a missing projects root themselves (see
+    check_projects_root), since it belongs in the result, not just the log.
     """
     parsed = 0
     for f in sorted(projects_dir().glob("*/*.jsonl")):
         try:
-            s, hit = cached_summary(f, pricing)
+            s, hit = cached_summary(f, pricing, warnings)
         except (OSError, ValueError, AttributeError) as e:
             # OSError: unreadable/a directory. ValueError: UnicodeDecodeError
             # and malformed JSON. AttributeError: a cache entry of the wrong shape.
@@ -793,6 +853,7 @@ def iter_summaries(pricing, cutoff=None, project=None, exclude=None, progress=Fa
 def run_history(by="project", since=None, project=None, warnings=None):
     pricing = load_pricing(warnings)
     cutoff = since_cutoff(since)
+    missing_root = check_projects_root(warnings)
     rows = {}
     unpriced, skipped = set(), []
 
@@ -806,7 +867,7 @@ def run_history(by="project", since=None, project=None, warnings=None):
         r["calls"] += calls
 
     for s in iter_summaries(pricing, cutoff=cutoff, project=project, progress=True,
-                            skipped=skipped):
+                            skipped=skipped, warnings=warnings):
         unpriced.update(unpriced_models(s.get("by_model", {}), pricing))
         if by == "project":
             add_row(s["project"], s["total"]["usage"], s["total"]["cost_usd"], 1)
@@ -825,7 +886,8 @@ def run_history(by="project", since=None, project=None, warnings=None):
 
     ordered = sorted(rows.values(), key=lambda r: (-(r["cost_usd"] or 0), r["key"]))
     return {"by": by, "since": since, "project": project, "rows": ordered,
-            "unpriced_models": sorted(unpriced), "skipped_transcripts": skipped}
+            "unpriced_models": sorted(unpriced), "skipped_transcripts": skipped,
+            "projects_dir_missing": missing_root}
 
 
 def burn_rate_line(total_cost, since):
@@ -895,7 +957,8 @@ def render_history(data):
     if burn:
         lines += ["", burn]
     for note in (unpriced_footnote(data.get("unpriced_models") or []),
-                 skipped_footnote(data.get("skipped_transcripts") or [])):
+                 skipped_footnote(data.get("skipped_transcripts") or []),
+                 projects_dir_footnote(data.get("projects_dir_missing"))):
         if note:
             lines += ["", note]
     return "\n".join(lines)
@@ -906,9 +969,11 @@ def run_top_consumers(by="session", since="30d", project=None, limit=10, warning
     sessions (by="command") in a window. Unpriced rows sort last."""
     pricing = load_pricing(warnings)
     cutoff = since_cutoff(since)
+    missing_root = check_projects_root(warnings)
     unpriced, skipped = set(), []
     sessions, commands = [], {}
-    for s in iter_summaries(pricing, cutoff=cutoff, project=project, skipped=skipped):
+    for s in iter_summaries(pricing, cutoff=cutoff, project=project, skipped=skipped,
+                            warnings=warnings):
         unpriced.update(unpriced_models(s.get("by_model", {}), pricing))
         if by == "session":
             sessions.append({"session_id": Path(s["path"]).stem, "path": s["path"],
@@ -937,7 +1002,7 @@ def run_top_consumers(by="session", since="30d", project=None, limit=10, warning
     rows.sort(key=lambda r: (r["cost_usd"] is None, -(r["cost_usd"] or 0.0), r[key]))
     data = {"by": by, "since": since, "project": project, "limit": limit,
             "rows": rows[:limit], "unpriced_models": sorted(unpriced),
-            "skipped_transcripts": skipped}
+            "skipped_transcripts": skipped, "projects_dir_missing": missing_root}
     if by == "session":
         # Counted over the whole window: unpriced sessions rank last, so the
         # limit is exactly what hides them.
@@ -947,7 +1012,13 @@ def run_top_consumers(by="session", since="30d", project=None, limit=10, warning
 
 def render_top_consumers(data):
     if not data["rows"]:
-        return "No commands in window." if data["by"] == "command" else "No sessions in window."
+        # Still footnoted: "no rows" is exactly when the reader needs to know
+        # whether there was anything to read in the first place.
+        empty = ("No commands in window." if data["by"] == "command"
+                 else "No sessions in window.")
+        return "\n\n".join([empty] + [n for n in (
+            skipped_footnote(data.get("skipped_transcripts") or []),
+            projects_dir_footnote(data.get("projects_dir_missing"))) if n])
     if data["by"] == "session":
         lines = ["| Session | Project | Started | Output | Input | Cache read | Cache write | Est. cost |",
                  "|---|---|---|---:|---:|---:|---:|---:|"]
@@ -964,7 +1035,8 @@ def render_top_consumers(data):
             lines.append(f"| {name} | {r['sessions']} | {r['invocations']} "
                          + _usage_cells(u, r["cost_usd"]))
     notes = [unpriced_footnote(data.get("unpriced_models") or []),
-             skipped_footnote(data.get("skipped_transcripts") or [])]
+             skipped_footnote(data.get("skipped_transcripts") or []),
+             projects_dir_footnote(data.get("projects_dir_missing"))]
     if data["by"] == "session":
         shown = sum(1 for r in data["rows"] if r["cost_usd"] is None)
         cut = (data.get("unpriced_rows") or 0) - shown
@@ -1016,17 +1088,21 @@ def _median(xs):
     return xs[mid] if n % 2 else (xs[mid - 1] + xs[mid]) / 2
 
 
-def compute_baseline(pricing, project, days=30, exclude=None):
+def compute_baseline(pricing, project, days=30, exclude=None, warnings=None):
     """Per-project norms from the history index (median session cost; per-command
     median cost and cache-read ratio) over the trailing `days`, excluding the
     transcript at `exclude` (the session being analysed).
 
-    `skipped_transcripts` lists the paths the scan could not read: every
-    baseline rule goes quiet below INSIGHT_MIN_BASELINE_SESSIONS, so a thinned
-    corpus and a genuinely unremarkable session look identical without them."""
+    `skipped_transcripts` lists the paths the scan could not read, and
+    `projects_dir_missing` names a projects root that is not a directory at
+    all: every baseline rule goes quiet below INSIGHT_MIN_BASELINE_SESSIONS,
+    so a thinned corpus and a genuinely unremarkable session look identical
+    without them."""
     cutoff = since_cutoff(f"{days}d")
+    missing_root = check_projects_root(warnings)
     session_costs, commands, skipped = [], {}, []
-    for s in iter_summaries(pricing, cutoff=cutoff, exclude=exclude, skipped=skipped):
+    for s in iter_summaries(pricing, cutoff=cutoff, exclude=exclude, skipped=skipped,
+                            warnings=warnings):
         if s["project"] != project:
             continue
         if s["total"]["cost_usd"] is not None:
@@ -1041,6 +1117,7 @@ def compute_baseline(pricing, project, days=30, exclude=None):
     return {
         "sessions": len(session_costs),
         "skipped_transcripts": skipped,
+        "projects_dir_missing": missing_root,
         "median_session_cost": _median(session_costs),
         "commands": {label: {"sessions": len(c["costs"]),
                              "median_cost": _median(c["costs"]),
@@ -1207,9 +1284,10 @@ def run_insights(transcript=None, since=None, project=None, budget=None, warning
     pricing = load_pricing(warnings)
     if since:
         cutoff = since_cutoff(since)
+        missing_root = check_projects_root(warnings)
         skipped = []
         summaries = list(iter_summaries(pricing, cutoff=cutoff, project=project,
-                                        skipped=skipped))
+                                        skipped=skipped, warnings=warnings))
         # The trend rules compare the window's halves, so "how many sessions
         # matched" is not the whole story of what could be compared: report
         # the first half too, and let the renderer disclose a dead one.
@@ -1219,18 +1297,22 @@ def run_insights(transcript=None, since=None, project=None, budget=None, warning
                 "baseline": {"sessions": len(summaries), "since": since,
                              "first_half_sessions": len(first),
                              "first_half_cost": round(half_cost(first), 6)},
-                "skipped_transcripts": skipped}
+                "skipped_transcripts": skipped,
+                "projects_dir_missing": missing_root}
     t = resolve_transcript(transcript)
     data = aggregate(parse_session(t), pricing)
-    baseline = compute_baseline(pricing, project=t.parent.name, exclude=str(t))
+    baseline = compute_baseline(pricing, project=t.parent.name, exclude=str(t),
+                                warnings=warnings)
     # One canonical top-level key in both modes: render_insights footnotes it,
     # and a session-mode reader needs it most -- the baseline scan is the only
     # thing that makes session mode say anything at all.
     skipped = baseline.pop("skipped_transcripts")
+    missing_root = baseline.pop("projects_dir_missing")
     return {"mode": "session",
             "findings": session_insights(data, baseline, budget=budget),
             "baseline": baseline,
             "skipped_transcripts": skipped,
+            "projects_dir_missing": missing_root,
             "transcript_path": str(t)}
 
 
@@ -1303,9 +1385,10 @@ def render_insights(result):
             lines.append(tail)
     else:
         lines = [" ".join(x for x in (insights_all_clear(result, session), caveat) if x)]
-    note = skipped_footnote(result.get("skipped_transcripts") or [])
-    if note:
-        lines += ["", note]
+    for note in (skipped_footnote(result.get("skipped_transcripts") or []),
+                 projects_dir_footnote(result.get("projects_dir_missing"))):
+        if note:
+            lines += ["", note]
     return "\n".join(lines)
 
 
@@ -1410,16 +1493,23 @@ def locate_transcript(arg=None, session_id=None, project_dir=None):
 def budget_from_env(warnings=None):
     """Session budget from TOKEN_USAGE_BUDGET_USD, or None when unset/unparseable.
     Shared by the CLI, the Stop hook and the MCP server so all three read the
-    variable the same way. Unset is silent; a value that isn't a number is a
-    typo worth reporting (see warn())."""
+    variable the same way. Unset is silent; a value that isn't a number — or
+    isn't greater than zero — is a typo worth reporting (see warn())."""
     raw = os.environ.get("TOKEN_USAGE_BUDGET_USD")
     if raw is None:
         return None
     try:
-        return float(raw)
+        value = float(raw)
     except ValueError:
         warn(f"ignoring TOKEN_USAGE_BUDGET_USD={raw!r} — not a number", warnings)
         return None
+    if not math.isfinite(value) or value <= 0:
+        # 0, a negative value and NaN all parsed fine and then silently
+        # switched the hook's nudge and insights rule 6 off, leaving the user
+        # believing budget monitoring was armed.
+        warn(f"ignoring TOKEN_USAGE_BUDGET_USD={raw!r} — must be > 0", warnings)
+        return None
+    return value
 
 
 def resolve_transcript(arg):

@@ -11,6 +11,7 @@ JSON-RPC only; diagnostics go to stderr.
 
 import io
 import json
+import math
 import os
 import sys
 import traceback
@@ -100,6 +101,15 @@ class ToolError(Exception):
 _TYPES = {"string": str, "boolean": bool, "integer": int, "number": (int, float)}
 
 
+def _is_finite(val):
+    """True for a real number; False for NaN/Infinity (json.loads accepts the
+    bare literals). A huge int is finite but not float-convertible."""
+    try:
+        return math.isfinite(val)
+    except OverflowError:
+        return True
+
+
 def validate_args(schema, args):
     """Every problem with `args` against a tool inputSchema; [] when valid."""
     if not isinstance(args, dict):
@@ -120,6 +130,13 @@ def validate_args(schema, args):
         if not ok:
             article = "an" if typ[0] in "aeiou" else "a"
             problems.append(f"{key} must be {article} {typ}")
+            continue
+        if typ in ("integer", "number") and not _is_finite(val):
+            # NaN compares False against every bound, so exclusiveMinimum let
+            # {"budget_usd": NaN} through and the tool then ran with that rule
+            # silently disabled. (An integer field can only reach here as a
+            # huge int, which _is_finite accepts.)
+            problems.append(f"{key} must be a finite number")
             continue
         if "enum" in spec and val not in spec["enum"]:
             problems.append(f"{key} must be one of {spec['enum']}")
@@ -218,7 +235,14 @@ def handle_message(msg):
         name = params.get("name")
         if not isinstance(name, str) or not name:
             return _error(id_, -32602, "tools/call requires params.name")
-        return _result(id_, call_tool(name, params.get("arguments") or {}))
+        arguments = params.get("arguments")
+        if arguments is None:
+            arguments = {}      # "no arguments" is a legitimate call
+        if not isinstance(arguments, dict):
+            # `or {}` used to coerce []/0/""/false into {}, so a malformed
+            # call was answered about a session discovery guessed at.
+            return _error(id_, -32602, "params.arguments must be an object")
+        return _result(id_, call_tool(name, arguments))
     return _error(id_, -32601, f"method not found: {method}")
 
 
