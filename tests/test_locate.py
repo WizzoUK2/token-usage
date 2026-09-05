@@ -110,3 +110,13 @@ def test_resolve_transcript_exits_when_nothing_found(tu, tmp_path, monkeypatch):
     with pytest.raises(SystemExit) as e:
         tu.resolve_transcript(None)
     assert "no transcript found" in str(e.value)
+
+
+def test_resolve_transcript_names_the_path_the_user_passed(tu, tmp_path, monkeypatch):
+    # "pass a path to a session .jsonl file" is wrong advice when a path *was*
+    # passed and simply doesn't exist -- name the file instead.
+    proj, a, b = seed(tmp_path, monkeypatch, tu)
+    missing = tmp_path / "gone.jsonl"
+    with pytest.raises(SystemExit) as e:
+        tu.resolve_transcript(str(missing))
+    assert str(e.value) == f"token-usage: transcript not found: {missing}"

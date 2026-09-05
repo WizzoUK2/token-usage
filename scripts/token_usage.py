@@ -14,6 +14,8 @@ Subcommands:
     report [TRANSCRIPT]   Markdown breakdown table (default: latest session in cwd project)
     json   [TRANSCRIPT]   Same data as JSON
     hook                  Read Claude Code hook JSON on stdin, update the session ledger
+    history               Cross-session rollup by project/day/command/model (--by, --since)
+    insights              Rule-based findings for one session or a window (--since)
     top_consumers         Costliest sessions or commands in a window (--by, --since, --limit)
 
 Stdlib only. Python 3.9+.
@@ -803,6 +805,14 @@ def render_history_csv(data):
     return buf.getvalue()
 
 
+def _usage_cells(u, cost):
+    """The output/input/cache-read/cache-write/cost cells shared by every
+    history and top-consumers row (leading pipe included)."""
+    return (f"| {fmt_tokens(u['output'])} | {fmt_tokens(u['input'])} "
+            f"| {fmt_tokens(u['cache_read'])} | {fmt_tokens(u['cache_5m'] + u['cache_1h'])} "
+            f"| {fmt_cost(cost)} |")
+
+
 def render_history(data):
     head = {"project": "Project", "day": "Day",
             "command": "Command", "model": "Model"}[data["by"]]
@@ -814,9 +824,7 @@ def render_history(data):
     total_cost, calls = None, 0
     for r in data["rows"]:
         u = r["usage"]
-        lines.append(f"| {r['key']} | {r['calls']} | {fmt_tokens(u['output'])} | {fmt_tokens(u['input'])} "
-                     f"| {fmt_tokens(u['cache_read'])} | {fmt_tokens(u['cache_5m'] + u['cache_1h'])} "
-                     f"| {fmt_cost(r['cost_usd'])} |")
+        lines.append(f"| {r['key']} | {r['calls']} " + _usage_cells(u, r["cost_usd"]))
         for k in total:
             total[k] += u[k]
         if r["cost_usd"] is not None:
@@ -874,9 +882,7 @@ def render_top_consumers(data):
         for r in data["rows"]:
             u = r["usage"]
             lines.append(f"| {r['session_id']} | {r['project']} | {(r['first_ts'] or '')[:10]} "
-                         f"| {fmt_tokens(u['output'])} | {fmt_tokens(u['input'])} "
-                         f"| {fmt_tokens(u['cache_read'])} | {fmt_tokens(u['cache_5m'] + u['cache_1h'])} "
-                         f"| {fmt_cost(r['cost_usd'])} |")
+                         + _usage_cells(u, r["cost_usd"]))
     else:
         lines = ["| Command | Sessions | Calls | Output | Input | Cache read | Cache write | Est. cost |",
                  "|---|---:|---:|---:|---:|---:|---:|---:|"]
@@ -884,9 +890,7 @@ def render_top_consumers(data):
             u = r["usage"]
             name = r["label"] if r["label"] == OTHER_LABEL else f"`{r['label']}`"
             lines.append(f"| {name} | {r['sessions']} | {r['invocations']} "
-                         f"| {fmt_tokens(u['output'])} | {fmt_tokens(u['input'])} "
-                         f"| {fmt_tokens(u['cache_read'])} | {fmt_tokens(u['cache_5m'] + u['cache_1h'])} "
-                         f"| {fmt_cost(r['cost_usd'])} |")
+                         + _usage_cells(u, r["cost_usd"]))
     note = unpriced_footnote(data.get("unpriced_models") or [])
     if note:
         lines += ["", note]
@@ -1196,10 +1200,23 @@ def locate_transcript(arg=None, session_id=None, project_dir=None):
     return find_latest_transcript(project_dir)
 
 
+def budget_from_env():
+    """Session budget from TOKEN_USAGE_BUDGET_USD, or None when unset/unparseable.
+    Shared by the CLI and the MCP server so both read the variable the same way."""
+    try:
+        return float(os.environ["TOKEN_USAGE_BUDGET_USD"])
+    except (KeyError, ValueError):
+        return None
+
+
 def resolve_transcript(arg):
     t = locate_transcript(arg)
     if t:
         return t
+    if arg:
+        # A path *was* passed, so "pass a path" is the wrong advice: the file
+        # is simply not there (typo, stale path, wrong machine).
+        sys.exit(f"token-usage: transcript not found: {arg}")
     sys.exit("token-usage: no transcript found — pass a path to a session .jsonl file")
 
 
@@ -1328,11 +1345,7 @@ def main():
     if args.cmd == "insights":
         if args.transcript and args.since:
             sys.exit("token-usage: pass a transcript OR --since, not both")
-        budget = None
-        try:
-            budget = float(os.environ["TOKEN_USAGE_BUDGET_USD"])
-        except (KeyError, ValueError):
-            pass
+        budget = budget_from_env()
         result = run_insights(transcript=args.transcript, since=args.since,
                               project=args.project, budget=budget)
         print(json.dumps(result, indent=1) if args.as_json else render_insights(result))
