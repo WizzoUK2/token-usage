@@ -215,7 +215,7 @@ Session mode (`insights [transcript]`) checks: cost outlier vs the 30-day projec
 
 Window mode (`insights --since 7d|30d|DATE [--project SUB]`) checks: spend trend between the first and second half of the window (warn ≥+50%, info ≥±25%), the top mover behind an increase (≥30% of it), and unpriced models anywhere in the window.
 
-No findings is a normal, healthy result — the tool prints `No notable findings.` rather than manufacturing something to say. `--json` returns the same findings as structured data for scripting.
+No findings is a normal, healthy result — the tool prints `No notable findings.` rather than manufacturing something to say. It says so only when it could actually look: a window that matched no sessions prints `No sessions in window — nothing was scanned.`, and a session whose project has fewer than the five prior sessions the comparison rules need adds `(baseline: N prior session(s); the comparison rules need 5)`. `--json` returns the same findings as structured data for scripting.
 
 ## How it works
 

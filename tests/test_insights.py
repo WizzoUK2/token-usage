@@ -240,7 +240,8 @@ def test_render_insights_names_the_session_in_both_branches(tu):
     assert tu.render_insights(r) == \
         "- [warn] watch out\n(session: -Users-x-alpha/aaa-111.jsonl)"
     # Window mode has no session to name, so the bare sentence stands.
-    assert tu.render_insights({"findings": [], "mode": "window"}) == "No notable findings."
+    assert tu.render_insights({"findings": [], "mode": "window",
+                               "baseline": {"sessions": 3}}) == "No notable findings."
 
 
 def test_run_insights_session_mode(tu, monkeypatch, tmp_path):
@@ -334,3 +335,65 @@ def test_insights_cli_rejects_project_without_since(tu, tmp_path):
                          capture_output=True, text=True, check=False)
     assert out.returncode != 0
     assert "--project applies to window mode (use --since)" in out.stderr
+
+
+def test_render_insights_all_clear_states_what_was_examined(tu):
+    # An empty findings list is also what "the rules could not run" looks like.
+    # Window mode that matched no sessions at all, and a session-mode baseline
+    # below INSIGHT_MIN_BASELINE_SESSIONS (rules 1-2 off), must not read as a
+    # clean bill of health.
+    assert tu.render_insights({"findings": [], "mode": "window",
+                               "baseline": {"sessions": 0, "since": "7d"}}) == \
+        "No sessions in window — nothing was scanned."
+    # A window that did scan sessions and found nothing is a real all-clear.
+    assert tu.render_insights({"findings": [], "mode": "window",
+                               "baseline": {"sessions": 4, "since": "7d"}}) == \
+        "No notable findings."
+    path = "/home/u/.claude/projects/-Users-x-p/current.jsonl"
+    assert tu.render_insights({"findings": [], "mode": "session",
+                               "transcript_path": path,
+                               "baseline": {"sessions": 1}}) == \
+        ("No notable findings. (session: -Users-x-p/current.jsonl) "
+         "(baseline: 1 prior session(s); the comparison rules need 5)")
+    # At the threshold the rules did run, so the plain sentence stands.
+    assert tu.render_insights({"findings": [], "mode": "session",
+                               "transcript_path": path,
+                               "baseline": {"sessions": 5}}) == \
+        "No notable findings. (session: -Users-x-p/current.jsonl)"
+    # A thin baseline is only news when nothing fired; findings speak louder.
+    r = {"findings": [tu.finding("x", "warn", "watch out")], "mode": "session",
+         "transcript_path": path, "baseline": {"sessions": 1}}
+    assert tu.render_insights(r) == \
+        "- [warn] watch out\n(session: -Users-x-p/current.jsonl)"
+
+
+def test_window_mode_empty_scan_says_nothing_was_scanned(tu, monkeypatch, tmp_path):
+    # A projects dir that does not exist, and a --project matching no slug:
+    # both scan zero sessions and both used to print a confident all-clear.
+    monkeypatch.setenv("TOKEN_USAGE_PROJECTS_DIR", str(tmp_path / "nope"))
+    monkeypatch.setenv("TOKEN_USAGE_LEDGER_DIR", str(tmp_path / "cache"))
+    r = tu.run_insights(since="7d")
+    assert r["baseline"]["sessions"] == 0 and r["findings"] == []
+    assert tu.render_insights(r) == "No sessions in window — nothing was scanned."
+
+    monkeypatch.setenv("TOKEN_USAGE_PROJECTS_DIR", str(tmp_path / "projects"))
+    _session(tmp_path, "s0", 2000)
+    assert tu.render_insights(tu.run_insights(since="2026-01-01",
+                                              project="no-such-project")) == \
+        "No sessions in window — nothing was scanned."
+
+
+def test_session_mode_thin_baseline_is_disclosed(tu, monkeypatch, tmp_path):
+    # One prior session in the project: rule 1 cannot fire however extreme the
+    # current session is, so the all-clear has to say the baseline is too thin.
+    monkeypatch.setenv("TOKEN_USAGE_PROJECTS_DIR", str(tmp_path / "projects"))
+    monkeypatch.setenv("TOKEN_USAGE_LEDGER_DIR", str(tmp_path / "cache"))
+    from datetime import datetime, timedelta, timezone
+    ts = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    _session(tmp_path, "s0", 100, ts=ts)                     # ~$0.005
+    current = _session(tmp_path, "current", 2000000, ts=ts)  # $100.00, 1000x
+    r = tu.run_insights(transcript=current)
+    assert r["findings"] == [] and r["baseline"]["sessions"] == 1
+    assert tu.render_insights(r) == (
+        "No notable findings. (session: p/current.jsonl) "
+        "(baseline: 1 prior session(s); the comparison rules need 5)")

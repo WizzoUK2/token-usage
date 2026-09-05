@@ -114,6 +114,15 @@ adheres to [Semantic Versioning](https://semver.org/).
   `skipped_transcripts` in the JSON — at the top level in both `insights`
   modes, since a thinned baseline silently switches every session-mode rule
   off — and footnoted in the markdown.
+- **`insights` no longer prints a clean bill of health when the rules could
+  not run.** An empty findings list also covered a window scan that matched no
+  sessions at all (a missing or mistyped `TOKEN_USAGE_PROJECTS_DIR`, a fresh
+  machine, a `--project` substring matching no slug) and a session-mode
+  baseline below the five prior sessions the comparison rules need — only
+  `--json`'s `baseline.sessions` gave either away. The window case now reads
+  `No sessions in window — nothing was scanned.` (matching `top_consumers`),
+  and the session case appends `(baseline: N prior session(s); the comparison
+  rules need 5)` after the session name.
 - **`insights --project` without `--since` is an error, not a silent
   no-op.** `insights --project other` (and the MCP `insights
   {"project": …}`) took the session-mode path with the filter dropped, so it

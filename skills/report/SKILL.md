@@ -89,6 +89,7 @@ Use session mode (no `--since`) when the user asks about the current or a specif
 1. Show the findings verbatim — each is a `- [warn|info] message` line, already worded for a human to read.
 2. Add at most 1–2 sentences of interpretation on top (e.g. which finding is most actionable). Do not restate every line in prose.
 3. Never invent a finding the tool didn't emit — if the tool says `No notable findings.`, say that plainly; it's a normal, healthy result, not a failure or something to explain away.
+4. The all-clear says what was examined — pass that on rather than dropping it. `No sessions in window — nothing was scanned.` means the scan found no transcripts at all (check the window and `--project`), and a trailing `(baseline: N prior session(s); the comparison rules need 5)` means the cost-outlier and cache-regression rules were off for this project, so an expensive session could still have gone unremarked.
 
 ## Interpreting the columns
 

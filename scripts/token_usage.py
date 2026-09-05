@@ -1208,12 +1208,36 @@ def run_insights(transcript=None, since=None, project=None, budget=None, warning
             "transcript_path": str(t)}
 
 
+def insights_all_clear(result, session):
+    """The empty-findings line, qualified by what the scan actually managed to
+    examine.
+
+    An empty `findings` list is also what "the rules could not run" looks like,
+    and the two commonest causes are silent: a window scan that matched no
+    sessions at all (missing/mistyped TOKEN_USAGE_PROJECTS_DIR, a fresh
+    machine, a `project` filter matching no slug), and a session-mode baseline
+    below INSIGHT_MIN_BASELINE_SESSIONS, which switches the comparison rules
+    off for every young project. Both get said out loud rather than rendering
+    as a clean bill of health. A baseline count the caller did not supply is
+    left alone — the renderer states only what it was told."""
+    n = (result.get("baseline") or {}).get("sessions")
+    mode = result.get("mode")
+    if mode == "window" and n == 0:
+        return "No sessions in window — nothing was scanned."
+    line = ("No notable findings. " + session).strip()
+    if mode == "session" and n is not None and n < INSIGHT_MIN_BASELINE_SESSIONS:
+        line += (f" (baseline: {n} prior session(s); the comparison rules "
+                 f"need {INSIGHT_MIN_BASELINE_SESSIONS})")
+    return line
+
+
 def render_insights(result):
     """Findings as `- [severity] message` lines, or "No notable findings.".
 
     Session mode names the session in either branch — "nothing to report" is
     exactly when the reader has no other clue which session was measured, and
-    discovery may well have guessed it."""
+    discovery may well have guessed it. The all-clear itself is qualified by
+    the baseline — see insights_all_clear()."""
     transcript_path = result.get("transcript_path")
     session = ""
     if transcript_path:
@@ -1224,7 +1248,7 @@ def render_insights(result):
         if session:
             lines.append(session)
     else:
-        lines = [("No notable findings. " + session).strip()]
+        lines = [insights_all_clear(result, session)]
     note = skipped_footnote(result.get("skipped_transcripts") or [])
     if note:
         lines += ["", note]
