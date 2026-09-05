@@ -154,12 +154,12 @@ def _tool_result(text, is_error=False):
 
 
 def call_tool(name, args):
-    handler = HANDLERS.get(name)
     if name not in SCHEMAS:
         return _tool_result(f"unknown tool: {name}", True)
     problems = validate_args(SCHEMAS[name], args)
     if problems:
         return _tool_result("invalid arguments: " + "; ".join(problems), True)
+    handler = HANDLERS.get(name)
     if handler is None:
         return _tool_result(f"{name}: not implemented", True)
     real_stdout = sys.stdout
@@ -308,10 +308,6 @@ def project_dir_from_env():
     return None
 
 
-# Rungs that mean "nobody named this session; discovery guessed it".
-GUESSED_RUNGS = ("cwd", "any_project")
-
-
 def check_since(value, key="since"):
     """Validate a window value the way the analyser will, but complain in the
     tool's own vocabulary — an MCP caller never typed a "--since" flag."""
@@ -351,8 +347,9 @@ def pick_transcript(path=None, session_id=None):
 
 
 def guess_note(transcript, via):
-    """Markdown footnotes for a session nobody actually named."""
-    if via not in GUESSED_RUNGS:
+    """Markdown footnotes for a session nobody named — the rungs where
+    discovery guessed it."""
+    if via not in ("cwd", "any_project"):
         return []
     return [("Note: no project dir was supplied; this is the newest transcript under "
              f"{transcript.parent.name}, which may not be the session you meant.")]
@@ -391,8 +388,9 @@ def _path_or_id(value):
     """diff accepts either form per side: a path-shaped value is a path, else a session id."""
     if not value.strip():
         raise ToolError("old/new must not be blank")
-    return (pick_transcript(path=value) if _looks_like_path(value)
-            else pick_transcript(session_id=value))[0]
+    if _looks_like_path(value):
+        return pick_transcript(path=value)[0]
+    return pick_transcript(session_id=value)[0]
 
 
 def tool_diff(args):
@@ -441,8 +439,9 @@ def tool_insights(args):
 
 def tool_top_consumers(args):
     warnings = []
-    check_since(args.get("since", "30d"))
-    data = tu.run_top_consumers(by=args.get("by", "session"), since=args.get("since", "30d"),
+    since = args.get("since", "30d")
+    check_since(since)
+    data = tu.run_top_consumers(by=args.get("by", "session"), since=since,
                                 project=args.get("project"), limit=args.get("limit", 10),
                                 warnings=warnings)
     return finish(data, tu.render_top_consumers, args.get("format"), warnings)
