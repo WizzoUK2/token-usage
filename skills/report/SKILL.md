@@ -97,7 +97,8 @@ Use session mode (no `--since`) when the user asks about the current or a specif
 
 ## Troubleshooting
 
-- "no transcript found": the cwd does not map to a Claude Code project directory and no Cowork mount was found. Ask the user for the transcript path, or list `~/.claude/projects/` (Claude Code) / `/sessions/*/mnt/.claude/projects/` (Cowork) to locate the right transcript.
+- "transcript not found: <path>": the path passed does not exist (typo, stale path, wrong machine) — check it before looking anywhere else.
+- "no transcript found": no path was passed, the cwd does not map to a Claude Code project directory, and no Cowork mount was found. Ask the user for the transcript path, or list `~/.claude/projects/` (Claude Code) / `/sessions/*/mnt/.claude/projects/` (Cowork) to locate the right transcript.
 - Zero rows / empty table: the session has no assistant turns yet.
 - Costs look ~2.5× too high vs `/cost`: the dedup-by-requestId logic failed — verify the transcript entries carry `requestId` fields and report the issue.
 - `history` shows fewer sessions than expected: `--since` filters by the first timestamp in each transcript; sessions with no timestamps are skipped.

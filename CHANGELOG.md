@@ -23,7 +23,8 @@ adheres to [Semantic Versioning](https://semver.org/).
   `--since`, `--project`, `--limit`, `--json`. Unpriced rows sort last.
 - **Session-id lookup** — `locate_transcript()` resolves a Claude Code session
   id across every project; `resolve_transcript()` now fails cleanly on a
-  non-existent explicit path instead of crashing in the parser.
+  non-existent explicit path (`transcript not found: <path>`) instead of
+  crashing in the parser.
 - **Pricing:** `claude-fable-5-1`, `claude-mythos-5-1` ($10/$50, cache hits
   $0.25/MTok) and `claude-opus-5` ($5/$25) in the bundled table. Fable 5.1
   usage previously fell through the prefix matcher to the `claude-fable-5`
@@ -48,6 +49,13 @@ adheres to [Semantic Versioning](https://semver.org/).
   no Claude Code history of its own can silently analyse a different
   project's most recent session instead of failing — pass an explicit
   transcript path or session id when that matters.
+- **`report` and `insights` now name the transcript they measured.** The
+  markdown `report` ends with a `Session: <project-slug>/<session>.jsonl`
+  line, `insights` text output appends `(session: <project-slug>/<session>.jsonl)`,
+  and `insights --json` gains `transcript_path` in session mode. Auto-discovery
+  can land on a session in a different project (see the fallback change
+  above), so which one was analysed is no longer left implicit. Scripts
+  parsing the text output should expect the extra trailing line.
 - **Sonnet 5 priced at $2/$10** (was $3/$15). Anthropic made the launch
   price permanent in September 2026 instead of raising it, so the "promo not
   modelled" caveat is gone. Sonnet 5 session costs drop by a third vs 0.5.0.

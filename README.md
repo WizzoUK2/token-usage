@@ -157,9 +157,15 @@ Every tool takes `format`: `json` (default, same shapes as the CLI's JSON output
 as protocol errors, so a missing transcript or a bad `since` is a readable message.
 
 **"Current session"** resolves in this order: explicit `transcript` path → `session_id`
-(searched across every project) → newest transcript for `TOKEN_USAGE_PROJECT_DIR`
-(Claude Code passes `${CLAUDE_PROJECT_DIR}`) → the Cowork mount → newest transcript on
-the machine (Claude desktop, which has no project dir).
+(searched across every project) → `TOKEN_USAGE_TRANSCRIPT` → auto-discovery. What
+auto-discovery does depends on whether there is a project dir to anchor on:
+
+- **With `TOKEN_USAGE_PROJECT_DIR`** — which Claude Code always supplies, since the
+  plugin's `.mcp.json` passes `${CLAUDE_PROJECT_DIR}` — it is the newest transcript for
+  *that project only*. There is no fall-through: a project with no sessions yet is an
+  error, never a guess at some other project's session.
+- **Without one** (Claude desktop, or the script run by hand): newest transcript for the
+  cwd's own project → the Cowork mount → newest transcript on the machine.
 
 **Claude desktop / Cowork.** Add to `claude_desktop_config.json`:
 
