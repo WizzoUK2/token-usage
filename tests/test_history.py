@@ -281,3 +281,65 @@ def test_index_recomputes_when_pricing_changes(tu, monkeypatch, tmp_path):
     assert (hit1, hit2, hit3) == (False, True, False)
     assert s1["total"]["cost_usd"] == 15.0
     assert s3["total"]["cost_usd"] == 10.0
+
+
+def test_unreadable_transcripts_are_skipped_and_disclosed(tu, tmp_path, monkeypatch):
+    # A directory named like a transcript (IsADirectoryError) used to be
+    # swallowed silently: every row vanished and the caller was told "no
+    # usage" with a clean exit. Skip it, say so on stderr, and name it.
+    proj = seed_projects(tmp_path, monkeypatch)
+    (proj / "-Users-x-repo-one" / "junk.jsonl").mkdir()
+    data = tu.run_history(by="project")
+    assert {r["key"] for r in data["rows"]} == {"-Users-x-repo-one", "-Users-x-repo-two"}
+    assert data["skipped_transcripts"] == [str(proj / "-Users-x-repo-one" / "junk.jsonl")]
+    out = tu.render_history(data)
+    assert "1 transcript(s) skipped (unreadable)" in out and "junk.jsonl" in out
+    top = tu.run_top_consumers(by="session", since="2026-01-01")
+    assert [r["session_id"] for r in top["rows"]] == ["s1", "s2"]
+    assert len(top["skipped_transcripts"]) == 1
+    assert "1 transcript(s) skipped (unreadable)" in tu.render_top_consumers(top)
+
+
+def test_iter_summaries_skips_a_non_dict_cache_entry(tu, tmp_path, monkeypatch, capsys):
+    # A cache file holding valid JSON that isn't an object used to crash the
+    # scan with AttributeError inside cached_summary's freshness check.
+    seed_projects(tmp_path, monkeypatch)
+    tu.run_history(by="project")
+    for f in (tmp_path / "cache" / "index").glob("*.json"):
+        f.write_text("[]")
+    skipped = []
+    rows = list(tu.iter_summaries(tu.load_pricing(), skipped=skipped))
+    assert len(rows) == 2 and skipped == []      # re-parsed, not skipped
+    assert capsys.readouterr().err == ""
+
+
+def test_unwritable_cache_dir_still_returns_rows(tu, tmp_path, monkeypatch, capsys):
+    import os as _os
+    if _os.geteuid() == 0:
+        import pytest as _pytest
+        _pytest.skip("root ignores directory permissions")
+    seed_projects(tmp_path, monkeypatch)
+    cache = tmp_path / "cache"
+    cache.mkdir(parents=True, exist_ok=True)
+    cache.chmod(0o500)
+    monkeypatch.setattr(tu, "_CACHE_WRITE_WARNED", False)
+    try:
+        data = tu.run_history(by="project")
+    finally:
+        cache.chmod(0o700)
+    by_key = {r["key"]: r for r in data["rows"]}
+    assert by_key["-Users-x-repo-one"]["usage"]["output"] == 100
+    assert by_key["-Users-x-repo-two"]["usage"]["output"] == 50
+    assert data["skipped_transcripts"] == []
+    err = capsys.readouterr().err
+    assert err.count("cannot write summary cache") == 1      # one warning per process
+
+
+def test_window_insights_and_baseline_disclose_skipped_transcripts(tu, tmp_path, monkeypatch):
+    proj = seed_projects(tmp_path, monkeypatch)
+    (proj / "-Users-x-repo-two" / "junk.jsonl").mkdir()
+    window = tu.run_insights(since="2026-01-01")
+    assert len(window["skipped_transcripts"]) == 1
+    assert "1 transcript(s) skipped (unreadable)" in tu.render_insights(window)
+    baseline = tu.compute_baseline(tu.load_pricing(), project="-Users-x-repo-one")
+    assert baseline["skipped_transcripts"] == 1              # a count is enough here

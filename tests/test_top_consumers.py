@@ -96,3 +96,35 @@ def test_cli_top_consumers_json(tu, tmp_path, monkeypatch):
     data = json.loads(r.stdout)
     assert data["by"] == "command" and data["limit"] == 2
     assert [row["label"] for row in data["rows"]] == ["/review", "/commit"]
+
+
+def test_session_mode_discloses_unpriced_rows_cut_by_the_limit(tu, tmp_path, monkeypatch):
+    # Unpriced sessions sort last, so a --limit is exactly what hides them —
+    # the count must survive the truncation that dropped them.
+    seed(tmp_path, monkeypatch)
+    full = tu.run_top_consumers(by="session", since="2026-01-01")
+    assert full["unpriced_rows"] == 1
+    assert "cut by --limit" not in tu.render_top_consumers(full)
+    cut = tu.run_top_consumers(by="session", since="2026-01-01", limit=2)
+    assert cut["unpriced_rows"] == 1
+    assert [r["session_id"] for r in cut["rows"]] == ["s1", "s2"]
+    assert "1 unpriced session(s) rank last and were cut by --limit" in \
+        tu.render_top_consumers(cut)
+
+
+def test_command_mode_flags_partially_priced_labels(tu, tmp_path, monkeypatch, tmp_path_factory):
+    # /review runs in two sessions, one of them on an unpriced model: the
+    # cost shown is the priced subtotal only, which has to be disclosed.
+    proj = seed(tmp_path, monkeypatch)
+    write_jsonl(proj / "-Users-x-two" / "s4.jsonl", [
+        user("2026-06-14T10:00:00Z", command="/review"),
+        assistant("2026-06-14T10:00:01Z", usage(out=500_000),
+                  model="claude-mystery-9", request_id="r5"),
+    ])
+    data = tu.run_top_consumers(by="command", since="2026-01-01")
+    rows = {r["label"]: r for r in data["rows"]}
+    assert rows["/review"]["partial"] is True
+    assert rows["/review"]["cost_usd"] == 7.0        # 140k out @ $50/MTok, priced only
+    assert rows["/commit"]["partial"] is False
+    out = tu.render_top_consumers(data)
+    assert "partially priced (some sessions on unpriced models)" in out

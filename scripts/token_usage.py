@@ -654,24 +654,38 @@ def summarize_transcript(path, pricing, st=None):
     }
 
 
+_CACHE_WRITE_WARNED = False
+
+
 def cached_summary(path, pricing):
     import hashlib
+    global _CACHE_WRITE_WARNED
     cache_file = index_dir() / (hashlib.sha1(str(path).encode()).hexdigest() + ".json")
     st = path.stat()
     if cache_file.exists():
         try:
             c = json.loads(cache_file.read_text())
-            if (c.get("version") == INDEX_VERSION
+            # Valid JSON that isn't an object would blow up on .get() — a
+            # corrupt entry must re-parse, never crash the whole scan.
+            if (isinstance(c, dict) and c.get("version") == INDEX_VERSION
                     and c.get("mtime_ns") == st.st_mtime_ns and c.get("size") == st.st_size
                     and c.get("pricing") == pricing_fingerprint(pricing)):
                 return c, True
         except (json.JSONDecodeError, OSError):
             pass
     s = summarize_transcript(path, pricing, st)
-    cache_file.parent.mkdir(parents=True, exist_ok=True)
-    tmp = cache_file.with_suffix(".tmp")
-    tmp.write_text(json.dumps(s))
-    tmp.replace(cache_file)
+    # An unwritable cache directory costs speed, not correctness: warn once
+    # per process and hand back the freshly parsed summary anyway.
+    try:
+        cache_file.parent.mkdir(parents=True, exist_ok=True)
+        tmp = cache_file.with_suffix(".tmp")
+        tmp.write_text(json.dumps(s))
+        tmp.replace(cache_file)
+    except OSError as e:
+        if not _CACHE_WRITE_WARNED:
+            _CACHE_WRITE_WARNED = True
+            print(f"token-usage: cannot write summary cache {index_dir()}: {e}",
+                  file=sys.stderr)
     return s, False
 
 
@@ -708,7 +722,8 @@ def _local_day(ts):
         return ts[:10]
 
 
-def iter_summaries(pricing, cutoff=None, project=None, exclude=None, progress=False):
+def iter_summaries(pricing, cutoff=None, project=None, exclude=None, progress=False,
+                   skipped=None):
     """Yield cached_summary() results for every transcript under projects_dir(),
     applying the filters shared by every caller that scans the whole corpus:
     an optional `cutoff` (skip sessions starting before it), an optional
@@ -721,12 +736,21 @@ def iter_summaries(pricing, cutoff=None, project=None, exclude=None, progress=Fa
 
     `progress` prints run_history's stderr counter for freshly-parsed (not
     cache-hit) transcripts; other callers leave it off.
+
+    A transcript that cannot be read or parsed is skipped with a stderr
+    warning and its path appended to `skipped` when a list is given — an
+    empty table is otherwise indistinguishable from "you spent nothing".
     """
     parsed = 0
     for f in sorted(projects_dir().glob("*/*.jsonl")):
         try:
             s, hit = cached_summary(f, pricing)
-        except OSError:
+        except (OSError, ValueError, AttributeError) as e:
+            # OSError: unreadable/a directory. ValueError: UnicodeDecodeError
+            # and malformed JSON. AttributeError: a cache entry of the wrong shape.
+            print(f"token-usage: skipping unreadable transcript {f}: {e}", file=sys.stderr)
+            if skipped is not None:
+                skipped.append(str(f))
             continue
         if progress and not hit:
             parsed += 1
@@ -745,7 +769,7 @@ def run_history(by="project", since=None, project=None):
     pricing = load_pricing()
     cutoff = since_cutoff(since)
     rows = {}
-    unpriced = set()
+    unpriced, skipped = set(), []
 
     def add_row(key, usage_dict, cost, calls):
         r = rows.setdefault(key, {"key": key, "usage": empty_usage(),
@@ -756,7 +780,8 @@ def run_history(by="project", since=None, project=None):
             r["cost_usd"] = (r["cost_usd"] or 0.0) + cost
         r["calls"] += calls
 
-    for s in iter_summaries(pricing, cutoff=cutoff, project=project, progress=True):
+    for s in iter_summaries(pricing, cutoff=cutoff, project=project, progress=True,
+                            skipped=skipped):
         unpriced.update(unpriced_models(s.get("by_model", {}), pricing))
         if by == "project":
             add_row(s["project"], s["total"]["usage"], s["total"]["cost_usd"], 1)
@@ -774,7 +799,8 @@ def run_history(by="project", since=None, project=None):
                 add_row(label, agg["usage"], agg["cost_usd"], agg["invocations"])
 
     ordered = sorted(rows.values(), key=lambda r: (-(r["cost_usd"] or 0), r["key"]))
-    return {"by": by, "since": since, "project": project, "rows": ordered, "unpriced_models": sorted(unpriced)}
+    return {"by": by, "since": since, "project": project, "rows": ordered,
+            "unpriced_models": sorted(unpriced), "skipped_transcripts": skipped}
 
 
 def burn_rate_line(total_cost, since):
@@ -803,6 +829,13 @@ def render_history_csv(data):
                     u["cache_read"], u["cache_5m"], u["cache_1h"],
                     "" if r["cost_usd"] is None else f"{r['cost_usd']:.4f}"])
     return buf.getvalue()
+
+
+def skipped_footnote(paths):
+    """Footnote naming transcripts the corpus scan could not read; None when none were."""
+    if not paths:
+        return None
+    return f"{len(paths)} transcript(s) skipped (unreadable): {', '.join(paths)}"
 
 
 def _usage_cells(u, cost):
@@ -836,9 +869,10 @@ def render_history(data):
     burn = burn_rate_line(total_cost, data.get("since"))
     if burn:
         lines += ["", burn]
-    note = unpriced_footnote(data.get("unpriced_models") or [])
-    if note:
-        lines += ["", note]
+    for note in (unpriced_footnote(data.get("unpriced_models") or []),
+                 skipped_footnote(data.get("skipped_transcripts") or [])):
+        if note:
+            lines += ["", note]
     return "\n".join(lines)
 
 
@@ -847,9 +881,9 @@ def run_top_consumers(by="session", since="30d", project=None, limit=10):
     sessions (by="command") in a window. Unpriced rows sort last."""
     pricing = load_pricing()
     cutoff = since_cutoff(since)
-    unpriced = set()
+    unpriced, skipped = set(), []
     sessions, commands = [], {}
-    for s in iter_summaries(pricing, cutoff=cutoff, project=project):
+    for s in iter_summaries(pricing, cutoff=cutoff, project=project, skipped=skipped):
         unpriced.update(unpriced_models(s.get("by_model", {}), pricing))
         if by == "session":
             sessions.append({"session_id": Path(s["path"]).stem, "path": s["path"],
@@ -859,18 +893,29 @@ def run_top_consumers(by="session", since="30d", project=None, limit=10):
             continue
         for label, agg in s["by_label"].items():
             c = commands.setdefault(label, {"label": label, "sessions": 0, "invocations": 0,
-                                            "usage": empty_usage(), "cost_usd": None})
+                                            "usage": empty_usage(), "cost_usd": None,
+                                            "partial": False})
             c["sessions"] += 1
             c["invocations"] += agg["invocations"]
             for k in c["usage"]:
                 c["usage"][k] += agg["usage"].get(k, 0)
-            if agg["cost_usd"] is not None:
+            if agg["cost_usd"] is None:
+                # The label's usage is complete but its cost is a priced
+                # subtotal — say so rather than quietly understating it.
+                c["partial"] = True
+            else:
                 c["cost_usd"] = (c["cost_usd"] or 0.0) + agg["cost_usd"]
     rows = sessions if by == "session" else list(commands.values())
     key = "session_id" if by == "session" else "label"
     rows.sort(key=lambda r: (r["cost_usd"] is None, -(r["cost_usd"] or 0.0), r[key]))
-    return {"by": by, "since": since, "project": project, "limit": limit,
-            "rows": rows[:limit], "unpriced_models": sorted(unpriced)}
+    data = {"by": by, "since": since, "project": project, "limit": limit,
+            "rows": rows[:limit], "unpriced_models": sorted(unpriced),
+            "skipped_transcripts": skipped}
+    if by == "session":
+        # Counted over the whole window: unpriced sessions rank last, so the
+        # limit is exactly what hides them.
+        data["unpriced_rows"] = sum(1 for r in rows if r["cost_usd"] is None)
+    return data
 
 
 def render_top_consumers(data):
@@ -891,9 +936,21 @@ def render_top_consumers(data):
             name = r["label"] if r["label"] == OTHER_LABEL else f"`{r['label']}`"
             lines.append(f"| {name} | {r['sessions']} | {r['invocations']} "
                          + _usage_cells(u, r["cost_usd"]))
-    note = unpriced_footnote(data.get("unpriced_models") or [])
-    if note:
-        lines += ["", note]
+    notes = [unpriced_footnote(data.get("unpriced_models") or []),
+             skipped_footnote(data.get("skipped_transcripts") or [])]
+    if data["by"] == "session":
+        shown = sum(1 for r in data["rows"] if r["cost_usd"] is None)
+        cut = (data.get("unpriced_rows") or 0) - shown
+        if cut > 0:
+            notes.append(f"{cut} unpriced session(s) rank last and were cut by --limit.")
+    else:
+        partial = sum(1 for r in data["rows"] if r.get("partial"))
+        if partial:
+            notes.append(f"{partial} command(s) partially priced "
+                         "(some sessions on unpriced models).")
+    for note in notes:
+        if note:
+            lines += ["", note]
     return "\n".join(lines)
 
 
@@ -937,8 +994,8 @@ def compute_baseline(pricing, project, days=30, exclude=None):
     median cost and cache-read ratio) over the trailing `days`, excluding the
     transcript at `exclude` (the session being analysed)."""
     cutoff = since_cutoff(f"{days}d")
-    session_costs, commands = [], {}
-    for s in iter_summaries(pricing, cutoff=cutoff, exclude=exclude):
+    session_costs, commands, skipped = [], {}, []
+    for s in iter_summaries(pricing, cutoff=cutoff, exclude=exclude, skipped=skipped):
         if s["project"] != project:
             continue
         if s["total"]["cost_usd"] is not None:
@@ -952,6 +1009,7 @@ def compute_baseline(pricing, project, days=30, exclude=None):
                 c["ratios"].append(r)
     return {
         "sessions": len(session_costs),
+        "skipped_transcripts": len(skipped),
         "median_session_cost": _median(session_costs),
         "commands": {label: {"sessions": len(c["costs"]),
                              "median_cost": _median(c["costs"]),
@@ -1104,10 +1162,13 @@ def run_insights(transcript=None, since=None, project=None, budget=None):
     pricing = load_pricing()
     if since:
         cutoff = since_cutoff(since)
-        summaries = list(iter_summaries(pricing, cutoff=cutoff, project=project))
+        skipped = []
+        summaries = list(iter_summaries(pricing, cutoff=cutoff, project=project,
+                                        skipped=skipped))
         return {"mode": "window",
                 "findings": window_insights(summaries, cutoff, pricing),
-                "baseline": {"sessions": len(summaries), "since": since}}
+                "baseline": {"sessions": len(summaries), "since": since},
+                "skipped_transcripts": skipped}
     t = resolve_transcript(transcript)
     data = aggregate(parse_session(t), pricing)
     baseline = compute_baseline(pricing, project=t.parent.name, exclude=str(t))
@@ -1119,12 +1180,16 @@ def run_insights(transcript=None, since=None, project=None, budget=None):
 
 def render_insights(result):
     if not result["findings"]:
-        return "No notable findings."
+        note = skipped_footnote(result.get("skipped_transcripts") or [])
+        return "No notable findings." + (f"\n\n{note}" if note else "")
     lines = [f"- [{f['severity']}] {f['message']}" for f in result["findings"]]
     transcript_path = result.get("transcript_path")
     if transcript_path:
         tp = Path(transcript_path)
         lines.append(f"(session: {tp.parent.name}/{tp.name})")
+    note = skipped_footnote(result.get("skipped_transcripts") or [])
+    if note:
+        lines += ["", note]
     return "\n".join(lines)
 
 
