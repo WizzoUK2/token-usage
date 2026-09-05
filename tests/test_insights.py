@@ -360,11 +360,39 @@ def test_render_insights_all_clear_states_what_was_examined(tu):
                                "transcript_path": path,
                                "baseline": {"sessions": 5}}) == \
         "No notable findings. (session: -Users-x-p/current.jsonl)"
-    # A thin baseline is only news when nothing fired; findings speak louder.
+    # A thin baseline is news in BOTH branches. The rules that need no
+    # baseline (ad-hoc dominance, unpriced models) fire happily on a young
+    # project, so a non-empty findings list is not evidence that the
+    # comparison rules ran -- and if the qualifier only ever appeared on the
+    # empty branch, its absence would mean nothing.
     r = {"findings": [tu.finding("x", "warn", "watch out")], "mode": "session",
          "transcript_path": path, "baseline": {"sessions": 1}}
-    assert tu.render_insights(r) == \
-        "- [warn] watch out\n(session: -Users-x-p/current.jsonl)"
+    assert tu.render_insights(r) == (
+        "- [warn] watch out\n(session: -Users-x-p/current.jsonl) "
+        "(baseline: 1 prior session(s); the comparison rules need 5)")
+    # No transcript path to name: the qualifier still has to land.
+    assert tu.render_insights({"findings": [tu.finding("x", "info", "fyi")],
+                               "mode": "session", "baseline": {"sessions": 0}}) == (
+        "- [info] fyi\n(baseline: 0 prior session(s); the comparison rules need 5)")
+    # Window mode: rules 7-8 are gated on the window's FIRST half having spend,
+    # so a window longer than the project's history switches them off just as
+    # silently as a thin session baseline did.
+    assert tu.render_insights({"findings": [], "mode": "window",
+                               "baseline": {"sessions": 6, "since": "30d",
+                                            "first_half_cost": 0.0}}) == (
+        "No notable findings. (baseline: no spend in the window's first half; "
+        "the trend rules need both halves)")
+    assert tu.render_insights({"findings": [tu.finding("x", "warn", "watch out")],
+                               "mode": "window",
+                               "baseline": {"sessions": 6, "since": "30d",
+                                            "first_half_cost": 0.0}}) == (
+        "- [warn] watch out\n(baseline: no spend in the window's first half; "
+        "the trend rules need both halves)")
+    # Both halves have spend: the rules ran, so nothing is qualified.
+    assert tu.render_insights({"findings": [], "mode": "window",
+                               "baseline": {"sessions": 6, "since": "30d",
+                                            "first_half_cost": 1.5}}) == \
+        "No notable findings."
 
 
 def test_window_mode_empty_scan_says_nothing_was_scanned(tu, monkeypatch, tmp_path):
@@ -397,3 +425,62 @@ def test_session_mode_thin_baseline_is_disclosed(tu, monkeypatch, tmp_path):
     assert tu.render_insights(r) == (
         "No notable findings. (session: p/current.jsonl) "
         "(baseline: 1 prior session(s); the comparison rules need 5)")
+
+
+def test_session_mode_thin_baseline_is_disclosed_alongside_findings(tu, monkeypatch,
+                                                                    tmp_path):
+    # The rules that fire on a young project need no baseline, so the ones
+    # that DO need one go off in silence unless the render says so. Here a
+    # 10,000x session is all ad-hoc: rule 3 fires, rule 1 cannot, and without
+    # the qualifier the reader is handed one [info] line as the whole story.
+    monkeypatch.setenv("TOKEN_USAGE_PROJECTS_DIR", str(tmp_path / "projects"))
+    monkeypatch.setenv("TOKEN_USAGE_LEDGER_DIR", str(tmp_path / "cache"))
+    from datetime import datetime, timedelta, timezone
+    ts = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    _session(tmp_path, "s0", 200, ts=ts)                    # ~$0.01
+    current = write_jsonl(tmp_path / "projects" / "p" / "current.jsonl", [
+        user(ts),                                           # no command: ad-hoc
+        assistant(ts, usage(inp=100, out=2000000, cache_read=1000), request_id="r1"),
+    ])
+    r = tu.run_insights(transcript=current)
+    assert {f["rule"] for f in r["findings"]} == {"adhoc-dominance"}
+    assert r["baseline"]["sessions"] == 1
+    assert tu.render_insights(r).endswith(
+        "(session: p/current.jsonl) "
+        "(baseline: 1 prior session(s); the comparison rules need 5)")
+
+
+def test_window_shorter_than_history_discloses_the_empty_first_half(tu, monkeypatch,
+                                                                    tmp_path):
+    # Every session inside the window's second half -> c1 == 0 -> rules 7 and 8
+    # cannot fire whatever the spend. That is "the rules could not run", not a
+    # clean bill of health.
+    monkeypatch.setenv("TOKEN_USAGE_PROJECTS_DIR", str(tmp_path / "projects"))
+    monkeypatch.setenv("TOKEN_USAGE_LEDGER_DIR", str(tmp_path / "cache"))
+    from datetime import datetime, timedelta, timezone
+    for i in range(6):
+        ts = (datetime.now(timezone.utc)
+              - timedelta(days=1, minutes=i)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        _session(tmp_path, f"s{i}", 4000, ts=ts)
+    r = tu.run_insights(since="30d")
+    assert r["baseline"]["sessions"] == 6
+    assert r["baseline"]["first_half_sessions"] == 0
+    assert r["baseline"]["first_half_cost"] == 0.0
+    assert r["findings"] == []
+    assert tu.render_insights(r) == (
+        "No notable findings. (baseline: no spend in the window's first half; "
+        "the trend rules need both halves)")
+
+
+def test_window_with_both_halves_populated_is_not_qualified(tu, monkeypatch, tmp_path):
+    monkeypatch.setenv("TOKEN_USAGE_PROJECTS_DIR", str(tmp_path / "projects"))
+    monkeypatch.setenv("TOKEN_USAGE_LEDGER_DIR", str(tmp_path / "cache"))
+    from datetime import datetime, timedelta, timezone
+    now = datetime.now(timezone.utc)
+    for i, days in enumerate([9, 8, 1]):
+        ts = (now - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        _session(tmp_path, f"s{i}", 4000, ts=ts)
+    r = tu.run_insights(since="10d")
+    assert r["baseline"]["first_half_sessions"] == 2
+    assert r["baseline"]["first_half_cost"] > 0
+    assert "baseline:" not in tu.render_insights(r)

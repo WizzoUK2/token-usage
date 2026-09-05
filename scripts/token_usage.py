@@ -1117,11 +1117,15 @@ def session_insights(data, baseline, budget=None):
     return out
 
 
-def window_insights(summaries, cutoff, pricing, now=None):
-    """Findings for a --since window: trend between the window's halves,
-    the top mover behind an increase, and window-wide unpriced models."""
+def window_halves(summaries, cutoff, now=None):
+    """(first, second) — the window's sessions split at its midpoint.
+
+    Sessions with no usable timestamp can't be placed in either half and sit
+    the comparison out. Shared with run_insights so the result can report how
+    much of the window rules 7-8 actually had to compare: they are gated on
+    the FIRST half having spend, and a window longer than the project's whole
+    history puts everything in the second."""
     from datetime import datetime, timezone
-    out = []
 
     def _dt(iso):
         d = datetime.fromisoformat(iso.replace("Z", "+00:00"))
@@ -1131,11 +1135,21 @@ def window_insights(summaries, cutoff, pricing, now=None):
 
     now_dt = _dt(now) if now else datetime.now(timezone.utc)
     mid = (_dt(cutoff) + (now_dt - _dt(cutoff)) / 2).strftime("%Y-%m-%dT%H:%M:%SZ")
-    placed = [s for s in summaries if s["first_ts"]]  # undatable sessions can't join a half
-    first = [s for s in placed if s["first_ts"] < mid]
-    second = [s for s in placed if s["first_ts"] >= mid]
-    c1 = sum(s["total"]["cost_usd"] or 0.0 for s in first)
-    c2 = sum(s["total"]["cost_usd"] or 0.0 for s in second)
+    placed = [s for s in summaries if s["first_ts"]]
+    return ([s for s in placed if s["first_ts"] < mid],
+            [s for s in placed if s["first_ts"] >= mid])
+
+
+def half_cost(summaries):
+    return sum(s["total"]["cost_usd"] or 0.0 for s in summaries)
+
+
+def window_insights(summaries, cutoff, pricing, now=None):
+    """Findings for a --since window: trend between the window's halves,
+    the top mover behind an increase, and window-wide unpriced models."""
+    out = []
+    first, second = window_halves(summaries, cutoff, now=now)
+    c1, c2 = half_cost(first), half_cost(second)
 
     # 7: spend trend, half over half
     if c1 > 0:
@@ -1190,9 +1204,15 @@ def run_insights(transcript=None, since=None, project=None, budget=None, warning
         skipped = []
         summaries = list(iter_summaries(pricing, cutoff=cutoff, project=project,
                                         skipped=skipped))
+        # The trend rules compare the window's halves, so "how many sessions
+        # matched" is not the whole story of what could be compared: report
+        # the first half too, and let the renderer disclose a dead one.
+        first, _second = window_halves(summaries, cutoff)
         return {"mode": "window",
                 "findings": window_insights(summaries, cutoff, pricing),
-                "baseline": {"sessions": len(summaries), "since": since},
+                "baseline": {"sessions": len(summaries), "since": since,
+                             "first_half_sessions": len(first),
+                             "first_half_cost": round(half_cost(first), 6)},
                 "skipped_transcripts": skipped}
     t = resolve_transcript(transcript)
     data = aggregate(parse_session(t), pricing)
@@ -1208,27 +1228,53 @@ def run_insights(transcript=None, since=None, project=None, budget=None, warning
             "transcript_path": str(t)}
 
 
-def insights_all_clear(result, session):
-    """The empty-findings line, qualified by what the scan actually managed to
-    examine.
+def insights_caveat(result):
+    """The trailing "(baseline: ...)" qualifier naming rules that could not
+    run, or "" when everything the mode offers did run.
 
-    An empty `findings` list is also what "the rules could not run" looks like,
-    and the two commonest causes are silent: a window scan that matched no
-    sessions at all (missing/mistyped TOKEN_USAGE_PROJECTS_DIR, a fresh
-    machine, a `project` filter matching no slug), and a session-mode baseline
-    below INSIGHT_MIN_BASELINE_SESSIONS, which switches the comparison rules
-    off for every young project. Both get said out loud rather than rendering
-    as a clean bill of health. A baseline count the caller did not supply is
-    left alone — the renderer states only what it was told."""
-    n = (result.get("baseline") or {}).get("sessions")
+    It rides on BOTH branches of the render, findings or none. Several rules
+    need no baseline at all — ad-hoc dominance and unpriced models fire
+    happily on a project with one prior session — so a non-empty findings list
+    is not evidence that the comparison rules ran. Qualify only the empty
+    branch and the qualifier's absence means nothing, while the skill teaches
+    the reader to take it as "everything was checked".
+
+    Two silences to break:
+      * session mode — a baseline below INSIGHT_MIN_BASELINE_SESSIONS switches
+        rules 1-2 off for every young project;
+      * window mode — rules 7-8 are gated on the window's first half holding
+        spend, so a window longer than the project's history (or one whose
+        sessions all land after its midpoint) switches them off too.
+
+    A count the caller did not supply is left alone: state only what we know."""
+    b = result.get("baseline") or {}
     mode = result.get("mode")
-    if mode == "window" and n == 0:
+    if mode == "session":
+        n = b.get("sessions")
+        if n is not None and n < INSIGHT_MIN_BASELINE_SESSIONS:
+            return (f"(baseline: {n} prior session(s); the comparison rules "
+                    f"need {INSIGHT_MIN_BASELINE_SESSIONS})")
+    elif mode == "window":
+        c1 = b.get("first_half_cost")
+        if b.get("sessions") and c1 is not None and c1 <= 0:
+            return ("(baseline: no spend in the window's first half; "
+                    "the trend rules need both halves)")
+    return ""
+
+
+def insights_all_clear(result, session):
+    """The empty-findings sentence, qualified by what the scan managed to see.
+
+    An empty `findings` list is also what "the rules could not run" looks
+    like, and the commonest cause is silent: a window scan that matched no
+    sessions at all (missing/mistyped TOKEN_USAGE_PROJECTS_DIR, a fresh
+    machine, a `project` filter matching no slug). That one replaces the
+    sentence outright; the narrower "some rules were off" cases are appended
+    by insights_caveat() in either branch."""
+    n = (result.get("baseline") or {}).get("sessions")
+    if result.get("mode") == "window" and n == 0:
         return "No sessions in window — nothing was scanned."
-    line = ("No notable findings. " + session).strip()
-    if mode == "session" and n is not None and n < INSIGHT_MIN_BASELINE_SESSIONS:
-        line += (f" (baseline: {n} prior session(s); the comparison rules "
-                 f"need {INSIGHT_MIN_BASELINE_SESSIONS})")
-    return line
+    return ("No notable findings. " + session).strip()
 
 
 def render_insights(result):
@@ -1236,19 +1282,21 @@ def render_insights(result):
 
     Session mode names the session in either branch — "nothing to report" is
     exactly when the reader has no other clue which session was measured, and
-    discovery may well have guessed it. The all-clear itself is qualified by
-    the baseline — see insights_all_clear()."""
+    discovery may well have guessed it. Both branches also carry the caveat —
+    see insights_caveat()."""
     transcript_path = result.get("transcript_path")
     session = ""
     if transcript_path:
         tp = Path(transcript_path)
         session = f"(session: {tp.parent.name}/{tp.name})"
+    caveat = insights_caveat(result)
     if result["findings"]:
         lines = [f"- [{f['severity']}] {f['message']}" for f in result["findings"]]
-        if session:
-            lines.append(session)
+        tail = " ".join(x for x in (session, caveat) if x)
+        if tail:
+            lines.append(tail)
     else:
-        lines = [insights_all_clear(result, session)]
+        lines = [" ".join(x for x in (insights_all_clear(result, session), caveat) if x)]
     note = skipped_footnote(result.get("skipped_transcripts") or [])
     if note:
         lines += ["", note]
@@ -1387,9 +1435,16 @@ def run_hook():
         payload = json.load(sys.stdin)
     except json.JSONDecodeError:
         return 0  # never block Claude Code on a malformed hook payload
+    # Well-formed JSON that isn't a hook payload gets no further: `null`, a
+    # list or a bare string all parse, and .get() on them raised *outside* the
+    # broad try below -- exit 1 and a traceback, which is the one thing a hook
+    # must never do. Same for a non-string transcript_path, which Path() would
+    # reject with a TypeError.
+    if not isinstance(payload, dict):
+        return 0
     transcript = payload.get("transcript_path")
     session_id = re.sub(r"[^A-Za-z0-9_-]", "", str(payload.get("session_id", "unknown"))) or "unknown"
-    if not transcript or not Path(transcript).exists():
+    if not isinstance(transcript, str) or not transcript or not Path(transcript).exists():
         return 0
     transcript = Path(transcript)
     if transcript.parent.name == "subagents":

@@ -122,7 +122,22 @@ adheres to [Semantic Versioning](https://semver.org/).
   `--json`'s `baseline.sessions` gave either away. The window case now reads
   `No sessions in window — nothing was scanned.` (matching `top_consumers`),
   and the session case appends `(baseline: N prior session(s); the comparison
-  rules need 5)` after the session name.
+  rules need 5)` after the session name. A window whose sessions all land
+  after its midpoint — any window longer than the project's history — is
+  disclosed the same way: the spend-trend and top-mover rules are gated on the
+  first half holding spend, so it appends `(baseline: no spend in the window's
+  first half; the trend rules need both halves)`, and `--json` carries
+  `baseline.first_half_sessions` / `first_half_cost`. Both qualifiers are
+  appended whether or not findings fired, since the rules that need no
+  baseline (ad-hoc dominance, unpriced models) fire happily on a young project
+  — a single `[info]` line was being handed over as the whole story for a
+  10,000× session.
+- **The Stop hook survives well-formed JSON that isn't a hook payload.**
+  `null`, a list, a bare string or a non-string `transcript_path` on stdin got
+  past the `JSONDecodeError` guard and then raised `AttributeError` /
+  `TypeError` outside the broad catch, exiting 1 with a traceback — the one
+  thing a hook must never do. Non-object payloads and non-string transcript
+  paths now exit 0 in silence.
 - **`insights --project` without `--since` is an error, not a silent
   no-op.** `insights --project other` (and the MCP `insights
   {"project": …}`) took the session-mode path with the filter dropped, so it

@@ -38,6 +38,23 @@ def test_hook_never_fails_on_garbage(tmp_path):
     assert r.returncode == 0
 
 
+def test_hook_never_fails_on_wrong_shaped_payload(tmp_path):
+    # Valid JSON that is not a hook payload: json.load() succeeds, so the
+    # JSONDecodeError guard never sees it, and payload.get() / Path() then
+    # raised outside the broad try that exists so a hook can never break the
+    # session. Exit 1 plus a traceback on stderr is exactly that break.
+    env = {**os.environ, "TOKEN_USAGE_LEDGER_DIR": str(tmp_path / "ledger")}
+    env.pop("TOKEN_USAGE_BUDGET_USD", None)
+    for payload in ("null", "[1, 2, 3]", '"hello"', "42", "true",
+                    '{"session_id": "s", "transcript_path": 42}',
+                    '{"session_id": "s", "transcript_path": ["a"]}',
+                    '{"session_id": "s", "transcript_path": null}'):
+        r = subprocess.run([sys.executable, str(SCRIPT), "hook"], input=payload,
+                           capture_output=True, text=True, env=env, check=False)
+        assert r.returncode == 0, (payload, r.stderr)
+        assert r.stdout.strip() == "" and r.stderr.strip() == "", payload
+
+
 def test_budget_nudge_fires_once(tmp_path):
     t = make_transcript(tmp_path, out_tokens=1_000_000)  # 1MTok fable output ≈ $50
     payload = {"session_id": "bud-1", "transcript_path": str(t)}
