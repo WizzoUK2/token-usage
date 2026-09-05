@@ -1,6 +1,13 @@
 """MCP server: JSON-RPC framing, handshake, tools, error paths."""
 import io
 import json
+import os
+import subprocess
+import sys
+
+from conftest import SERVER, TOKEN_USAGE, assistant, usage, user, write_jsonl
+
+PLUGIN_ROOT = SERVER.parent.parent
 
 
 def req(method, id_=1, **params):
@@ -44,6 +51,15 @@ def test_notifications_get_no_response(mcp):
     assert mcp.handle_message(notif("notifications/whatever")) is None
 
 
+def test_id_less_requests_are_notifications_even_for_known_methods(mcp):
+    # JSON-RPC 2.0 forbids replying to a notification, so an id-less message
+    # gets no response whatever its method -- answering with "id": null is a
+    # protocol violation, not a courtesy.
+    for m in (notif("ping"), notif("initialize", protocolVersion="2025-06-18"),
+              notif("tools/list"), notif("tools/call", name="history", arguments={})):
+        assert mcp.handle_message(m) is None, m["method"]
+
+
 def test_ping(mcp):
     assert mcp.handle_message(req("ping", id_=7)) == {"jsonrpc": "2.0", "id": 7, "result": {}}
 
@@ -76,6 +92,27 @@ def test_serve_frames_one_json_per_line_and_survives_garbage(mcp):
     assert lines[2]["result"] == {}
 
 
+def test_serve_survives_a_crash_in_handle_message(mcp, monkeypatch):
+    # Anything escaping handle_message must become a JSON-RPC internal error
+    # for that one request; the read loop keeps serving the next message.
+    real = mcp.handle_message
+
+    def boom(msg):
+        if msg.get("method") == "explode":
+            raise RuntimeError("kaboom")
+        return real(msg)
+
+    monkeypatch.setattr(mcp, "handle_message", boom)
+    stdin = io.StringIO("\n".join([json.dumps(req("explode", id_=5)),
+                                   json.dumps(req("ping", id_=6))]) + "\n")
+    stdout = io.StringIO()
+    mcp.serve(stdin=stdin, stdout=stdout)
+    lines = [json.loads(l) for l in stdout.getvalue().splitlines()]
+    assert lines[0]["id"] == 5 and lines[0]["error"]["code"] == -32603
+    assert "kaboom" in lines[0]["error"]["message"]
+    assert lines[1] == {"jsonrpc": "2.0", "id": 6, "result": {}}
+
+
 TOOL_NAMES = {"session_cost", "history", "insights", "diff", "top_consumers"}
 
 
@@ -94,6 +131,9 @@ def test_tools_list_names_and_schema_shape(mcp):
     assert by_name["history"]["inputSchema"]["properties"]["by"]["enum"] == \
         ["project", "day", "command", "model"]
     assert by_name["top_consumers"]["inputSchema"]["properties"]["limit"]["minimum"] == 1
+    # top_consumers is the one tool with a non-empty default window; a caller
+    # reading only the schema must be able to see it.
+    assert "30d" in by_name["top_consumers"]["inputSchema"]["properties"]["since"]["description"]
 
 
 def test_validate_args_reports_every_problem(mcp):
@@ -131,14 +171,13 @@ def test_invalid_arguments_are_a_tool_error(mcp):
     assert res["isError"] is True and "by" in res["content"][0]["text"]
 
 
-def test_call_tool_wraps_exceptions_and_sys_exit(mcp, monkeypatch):
+def test_call_tool_wraps_exceptions_and_sys_exit(mcp):
     mcp.HANDLERS["boom"] = lambda args: 1 / 0
     mcp.SCHEMAS["boom"] = {"type": "object", "properties": {}, "additionalProperties": False}
     r = mcp.call_tool("boom", {})
     assert r["isError"] and "ZeroDivisionError" in r["content"][0]["text"]
 
     def exits(args):
-        import sys
         sys.exit("token-usage: invalid --since value")
     mcp.HANDLERS["exits"] = exits
     mcp.SCHEMAS["exits"] = mcp.SCHEMAS["boom"]
@@ -156,10 +195,6 @@ def test_handler_prints_never_reach_stdout(mcp, capsys):
     out, err = capsys.readouterr()
     assert r == {"content": [{"type": "text", "text": "ok"}], "isError": False}
     assert out == "" and "progress" in err
-
-
-import os
-from conftest import assistant, usage, user, write_jsonl
 
 
 def seed(tmp_path, monkeypatch):
@@ -180,6 +215,10 @@ def seed(tmp_path, monkeypatch):
     monkeypatch.setenv("TOKEN_USAGE_LEDGER_DIR", str(tmp_path / "cache"))
     monkeypatch.delenv("TOKEN_USAGE_TRANSCRIPT", raising=False)
     monkeypatch.delenv("TOKEN_USAGE_PROJECT_DIR", raising=False)
+    # Discovery with no project dir falls through to the Cowork sandbox mounts,
+    # which on a real Cowork machine hold a transcript this suite must not see
+    # (cf. the same neutralisation in tests/test_locate.py).
+    monkeypatch.setattr(TOKEN_USAGE, "_cowork_roots", lambda: [])
     monkeypatch.chdir(tmp_path)
     return proj, s1, s2
 
@@ -256,6 +295,17 @@ def test_diff_rejects_blank_selectors(mcp, tmp_path, monkeypatch):
     assert err and "blank" in text
 
 
+def test_diff_reports_a_mistyped_path_as_a_path(mcp, tmp_path, monkeypatch):
+    # A value that looks like a path (separator, or a .jsonl suffix) is never a
+    # session id, so the error must say the file is missing rather than send
+    # the user hunting for a session called "/nope/typo.jsonl".
+    proj, s1, s2 = seed(tmp_path, monkeypatch)
+    text, err = call(mcp, "diff", old=str(tmp_path / "nope" / "typo.jsonl"), new="bbb-222")
+    assert err and "transcript not found" in text and "typo.jsonl" in text
+    text, err = call(mcp, "diff", old="gone.jsonl", new="bbb-222")
+    assert err and "transcript not found" in text
+
+
 def test_history_json_matches_cli_and_markdown_renders(mcp, tu, tmp_path, monkeypatch):
     seed(tmp_path, monkeypatch)
     data = json.loads(call(mcp, "history", by="command", since="2026-01-01")[0])
@@ -284,6 +334,16 @@ def test_insights_window_mode(mcp, tmp_path, monkeypatch):
     data = json.loads(call(mcp, "insights", since="2026-01-01")[0])
     assert data["mode"] == "window" and data["baseline"]["sessions"] == 2
     text, err = call(mcp, "insights", since="7d", session_id="bbb-222")
+    assert err and "not both" in text
+
+
+def test_insights_blank_transcript_is_rejected_even_with_since(mcp, tmp_path, monkeypatch):
+    # A present-but-blank selector is a mistake in both modes: it must not be
+    # silently ignored into window mode just because `since` is also set.
+    seed(tmp_path, monkeypatch)
+    text, err = call(mcp, "insights", transcript="", since="7d")
+    assert err and "not both" in text
+    text, err = call(mcp, "insights", session_id="", since="7d")
     assert err and "not both" in text
 
 
@@ -377,14 +437,6 @@ def test_insights_session_mode_falls_back_to_budget_env_var(mcp, tu, tmp_path, m
     monkeypatch.setenv("TOKEN_USAGE_BUDGET_USD", str(budget))
     data = json.loads(call(mcp, "insights", session_id="bbb-222")[0])
     assert any(f["rule"] == "budget-pace" for f in data["findings"])
-
-
-import subprocess
-import sys
-from pathlib import Path
-
-SERVER = Path(__file__).resolve().parent.parent / "scripts" / "mcp_server.py"
-PLUGIN_ROOT = SERVER.parent.parent
 
 
 def test_mcp_json_registers_server_with_plugin_root_paths():

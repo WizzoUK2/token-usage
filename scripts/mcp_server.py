@@ -75,7 +75,9 @@ TOOLS = [
     {"name": "top_consumers",
      "description": "The costliest sessions or command labels in a window.",
      "inputSchema": _schema({"by": {"type": "string", "enum": ["session", "command"]},
-                             "since": SINCE, "project": PROJECT,
+                             "since": dict(SINCE,
+                                           description=SINCE["description"] + " (default 30d)"),
+                             "project": PROJECT,
                              "limit": {"type": "integer", "minimum": 1,
                                        "description": "Rows to return (default 10)."}})},
 ]
@@ -164,7 +166,9 @@ def handle_message(msg):
     """Route one JSON-RPC message. Returns a response dict, or None for notifications."""
     if not isinstance(msg, dict) or msg.get("jsonrpc") != "2.0" or not isinstance(msg.get("method"), str):
         return _error(msg.get("id") if isinstance(msg, dict) else None, -32600, "invalid request")
-    method, id_ = msg["method"], msg.get("id")
+    if "id" not in msg:
+        return None  # notification (initialized, cancelled, ...) — JSON-RPC forbids a reply
+    method, id_ = msg["method"], msg["id"]
     params = msg.get("params") or {}
     if not isinstance(params, dict):
         return _error(id_, -32602, "params must be an object")
@@ -184,8 +188,6 @@ def handle_message(msg):
         if not isinstance(name, str) or not name:
             return _error(id_, -32602, "tools/call requires params.name")
         return _result(id_, call_tool(name, params.get("arguments") or {}))
-    if "id" not in msg:
-        return None  # notification (initialized, cancelled, ...) — nothing to say
     return _error(id_, -32601, f"method not found: {method}")
 
 
@@ -201,7 +203,11 @@ def serve(stdin=None, stdout=None):
         except ValueError:
             reply = _error(None, -32700, "parse error")
         else:
-            reply = handle_message(msg)
+            try:
+                reply = handle_message(msg)
+            except Exception as e:  # noqa: BLE001 — one bad message must not end the session
+                reply = _error(msg.get("id") if isinstance(msg, dict) else None,
+                               -32603, f"internal error: {type(e).__name__}: {e}")
         if reply is not None:
             stdout.write(json.dumps(reply) + "\n")
             stdout.flush()
@@ -241,12 +247,19 @@ def tool_session_cost(args):
                   args.get("format"))
 
 
+def _looks_like_path(value):
+    """A session id is a bare uuid-ish token, so anything carrying a path
+    separator or a .jsonl suffix was meant as a path — including a mistyped
+    one, which must be reported as a missing file rather than as an unknown id."""
+    seps = [os.sep] + ([os.altsep] if os.altsep else [])
+    return value.endswith(".jsonl") or any(sep in value for sep in seps)
+
+
 def _path_or_id(value):
-    """diff accepts either form per side: an existing path wins, else a session id."""
+    """diff accepts either form per side: a path-shaped value is a path, else a session id."""
     if not value.strip():
         raise ToolError("old/new must not be blank")
-    p = Path(value)
-    return pick_transcript(path=value) if p.is_file() else pick_transcript(session_id=value)
+    return pick_transcript(path=value) if _looks_like_path(value) else pick_transcript(session_id=value)
 
 
 def tool_diff(args):
@@ -262,15 +275,14 @@ def tool_history(args):
 
 
 def tool_insights(args):
-    has_session = bool(args.get("transcript") or args.get("session_id"))
+    # Presence, not truthiness: a blank transcript is a mistake to report, not
+    # a value to ignore into window mode.
+    has_session = args.get("transcript") is not None or args.get("session_id") is not None
     if has_session and args.get("since"):
         raise ToolError("pass a transcript/session_id OR since, not both")
     budget = args.get("budget_usd")
     if budget is None:
-        try:
-            budget = float(os.environ["TOKEN_USAGE_BUDGET_USD"])
-        except (KeyError, ValueError):
-            budget = None
+        budget = tu.budget_from_env()
     if args.get("since"):
         data = tu.run_insights(since=args["since"], project=args.get("project"), budget=budget)
     else:
