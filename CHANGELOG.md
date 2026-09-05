@@ -84,7 +84,8 @@ adheres to [Semantic Versioning](https://semver.org/).
   `--since`); `since`/`project` reject the empty string; `budget_usd` must be
   greater than 0; `transcript` and `session_id` together, and `project`
   alongside a session selector on `insights`, are rejected instead of one
-  silently winning. A handler that exits without a message reports
+  silently winning; and a float where an integer is required reads
+  `limit must be an integer`. A handler that exits without a message reports
   `<tool>: exited with status <code>` and an unexpected exception now leaves a
   traceback on stderr for the host log.
 - **`top_consumers --by command` on an empty window** says "No commands in

@@ -4,18 +4,9 @@ import os
 import pytest
 from conftest import assistant, usage, user, write_jsonl
 
-
-@pytest.fixture(autouse=True)
-def _no_cowork_mounts(monkeypatch, tu):
-    # Every test in this module ends up calling find_latest_transcript()
-    # (directly, via locate_transcript(), or via resolve_transcript()), and
-    # that function's Cowork fallback reads whatever this machine's real
-    # HOME/mnt/.claude/projects or /sessions/*/mnt/.claude/projects happen to
-    # contain. Neutralise that lookup for the whole module, unconditionally,
-    # rather than per-test via seed() — a test that never calls seed() (e.g.
-    # one exercising resolve_transcript() directly) must not see real Cowork
-    # sandbox mounts either.
-    monkeypatch.setattr(tu, "_cowork_roots", list)
+# The Cowork mount lookup is neutralised for every test by the autouse
+# _no_cowork_mounts fixture in conftest.py, so results here depend only on the
+# seeded projects tree.
 
 
 def seed(tmp_path, monkeypatch, tu):
@@ -33,9 +24,6 @@ def seed(tmp_path, monkeypatch, tu):
     os.utime(b, (1_700_000_100, 1_700_000_100))
     monkeypatch.setenv("TOKEN_USAGE_PROJECTS_DIR", str(proj))
     monkeypatch.delenv("TOKEN_USAGE_TRANSCRIPT", raising=False)
-    # Cowork mount neutralisation is handled module-wide by the autouse
-    # _no_cowork_mounts fixture above, so results here depend only on the
-    # seeded `proj` tree.
     return proj, a, b
 
 

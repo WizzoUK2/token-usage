@@ -116,7 +116,8 @@ def validate_args(schema, args):
         val, typ = args[key], spec.get("type")
         ok = isinstance(val, _TYPES[typ]) and not (typ in ("integer", "number") and isinstance(val, bool))
         if not ok:
-            problems.append(f"{key} must be a {typ}")
+            article = "an" if typ[0] in "aeiou" else "a"
+            problems.append(f"{key} must be {article} {typ}")
             continue
         if "enum" in spec and val not in spec["enum"]:
             problems.append(f"{key} must be one of {spec['enum']}")

@@ -134,3 +134,28 @@ def test_render_empty_window_names_the_grouping(tu, tmp_path, monkeypatch):
     seed(tmp_path, monkeypatch)
     empty_cmds = tu.run_top_consumers(by="command", since="2030-01-01")
     assert tu.render_top_consumers(empty_cmds) == "No commands in window."
+
+
+def test_render_command_mode_leaves_the_no_command_row_unquoted(tu, tmp_path, monkeypatch):
+    # "(no command)" is a bucket name, not a command anyone can type, so it
+    # must not be dressed up as code.
+    seed(tmp_path, monkeypatch)
+    out = tu.render_top_consumers(tu.run_top_consumers(by="command", since="2026-01-01"))
+    assert f"| {tu.OTHER_LABEL} |" in out
+    assert f"`{tu.OTHER_LABEL}`" not in out
+
+
+def test_cli_top_consumers_markdown_and_bad_limit(tu, tmp_path, monkeypatch):
+    import os
+    proj = seed(tmp_path, monkeypatch)
+    env = dict(os.environ, TOKEN_USAGE_PROJECTS_DIR=str(proj),
+               TOKEN_USAGE_LEDGER_DIR=str(tmp_path / "cache"))
+    r = subprocess.run([sys.executable, str(SCRIPT), "top_consumers",
+                        "--since", "2026-01-01"],
+                       capture_output=True, text=True, env=env, check=True)
+    assert r.stdout.startswith("| Session | Project | Started |")
+    assert "| s1 | -Users-x-one | 2026-06-10 |" in r.stdout
+    r = subprocess.run([sys.executable, str(SCRIPT), "top_consumers", "--limit", "0"],
+                       capture_output=True, text=True, env=env, check=False)
+    assert r.returncode != 0
+    assert r.stderr.strip() == "token-usage: --limit must be >= 1"

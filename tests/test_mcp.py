@@ -215,10 +215,6 @@ def seed(tmp_path, monkeypatch):
     monkeypatch.setenv("TOKEN_USAGE_LEDGER_DIR", str(tmp_path / "cache"))
     monkeypatch.delenv("TOKEN_USAGE_TRANSCRIPT", raising=False)
     monkeypatch.delenv("TOKEN_USAGE_PROJECT_DIR", raising=False)
-    # Discovery with no project dir falls through to the Cowork sandbox mounts,
-    # which on a real Cowork machine hold a transcript this suite must not see
-    # (cf. the same neutralisation in tests/test_locate.py).
-    monkeypatch.setattr(TOKEN_USAGE, "_cowork_roots", list)
     monkeypatch.chdir(tmp_path)
     return proj, s1, s2
 
@@ -306,7 +302,7 @@ def test_diff_reports_a_mistyped_path_as_a_path(mcp, tmp_path, monkeypatch):
     assert err and "transcript not found" in text
 
 
-def test_history_json_matches_cli_and_markdown_renders(mcp, tu, tmp_path, monkeypatch):
+def test_history_json_matches_run_history_and_markdown_renders(mcp, tu, tmp_path, monkeypatch):
     seed(tmp_path, monkeypatch)
     data = json.loads(call(mcp, "history", by="command", since="2026-01-01")[0])
     assert data.pop("warnings") == []          # MCP-only key, like transcript
@@ -705,3 +701,46 @@ def test_batch_arrays_are_rejected_and_documented(mcp):
     assert "batch" in mcp.handle_message.__doc__
     r = mcp.handle_message([{"jsonrpc": "2.0", "id": 1, "method": "ping"}])
     assert r["error"]["code"] == -32600
+
+
+def test_handle_message_edges(mcp):
+    # params must be an object: a list is a protocol-level mistake, not a
+    # tool error.
+    r = mcp.handle_message({"jsonrpc": "2.0", "id": 8, "method": "tools/call",
+                            "params": [1, 2]})
+    assert r["error"]["code"] == -32602 and r["id"] == 8
+    # A non-string method is an invalid request, not "method not found".
+    r = mcp.handle_message({"jsonrpc": "2.0", "id": 9, "method": 42})
+    assert r["error"]["code"] == -32600 and r["id"] == 9
+    # An explicit null id is a request (the key is present), so it is answered
+    # — with id null, as JSON-RPC requires.
+    r = mcp.handle_message({"jsonrpc": "2.0", "id": None, "method": "ping"})
+    assert r == {"jsonrpc": "2.0", "id": None, "result": {}}
+
+
+def test_validate_args_rejects_a_float_for_an_integer(mcp):
+    schema = mcp.SCHEMAS["top_consumers"]
+    assert mcp.validate_args(schema, {"limit": 2.0}) == ["limit must be an integer"]
+    assert mcp.validate_args(schema, {"limit": 2}) == []
+
+
+def test_looks_like_path_recognises_a_bare_relative_path(mcp):
+    assert mcp._looks_like_path("a/b") is True
+    assert mcp._looks_like_path("sess.jsonl") is True
+    assert mcp._looks_like_path("aaa-111") is False
+
+
+def test_session_cost_agents_flag_is_passed_through(mcp, tmp_path, monkeypatch):
+    proj, _s1, _s2 = seed(tmp_path, monkeypatch)
+    t = write_jsonl(proj / "-Users-x-alpha" / "agy-777.jsonl", [
+        user("2026-06-15T10:00:00Z", command="/code-review"),
+        assistant("2026-06-15T10:00:01Z", usage(out=100), request_id="m1"),
+    ])
+    sub = t.parent / t.stem / "subagents"
+    write_jsonl(sub / "agent-001.jsonl",
+                [assistant("2026-06-15T10:00:30Z", usage(out=40), request_id="a1")])
+    (sub / "agent-001.meta.json").write_text('{"agentType": "Explore", "description": "scan"}')
+    md, err = call(mcp, "session_cost", transcript=str(t), format="markdown", agents=True)
+    assert not err and "↳ Explore" in md
+    plain, err = call(mcp, "session_cost", transcript=str(t), format="markdown")
+    assert not err and "↳ Explore" not in plain
