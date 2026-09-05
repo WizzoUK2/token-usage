@@ -254,3 +254,44 @@ def test_diff_rejects_blank_selectors(mcp, tmp_path, monkeypatch):
     assert err and "blank" in text
     text, err = call(mcp, "diff", old=str(s1), new="   ")
     assert err and "blank" in text
+
+
+def test_history_json_matches_cli_and_markdown_renders(mcp, tu, tmp_path, monkeypatch):
+    seed(tmp_path, monkeypatch)
+    data = json.loads(call(mcp, "history", by="command", since="2026-01-01")[0])
+    assert data == tu.run_history(by="command", since="2026-01-01")
+    md, err = call(mcp, "history", by="project", format="markdown")
+    assert not err and md.startswith("| Project | Calls |")
+
+
+def test_history_bad_since_is_a_tool_error(mcp, tmp_path, monkeypatch):
+    seed(tmp_path, monkeypatch)
+    text, err = call(mcp, "history", since="last tuesday")
+    assert err and "invalid --since" in text
+
+
+def test_insights_session_mode_names_transcript(mcp, tmp_path, monkeypatch):
+    proj, s1, s2 = seed(tmp_path, monkeypatch)
+    data = json.loads(call(mcp, "insights", session_id="bbb-222", budget_usd=1.0)[0])
+    assert data["mode"] == "session" and data["transcript"] == str(s2)
+    assert isinstance(data["findings"], list)
+    md, err = call(mcp, "insights", session_id="bbb-222", format="markdown")
+    assert not err and (md == "No notable findings." or md.startswith("- ["))
+
+
+def test_insights_window_mode(mcp, tmp_path, monkeypatch):
+    seed(tmp_path, monkeypatch)
+    data = json.loads(call(mcp, "insights", since="2026-01-01")[0])
+    assert data["mode"] == "window" and data["baseline"]["sessions"] == 2
+    text, err = call(mcp, "insights", since="7d", session_id="bbb-222")
+    assert err and "not both" in text
+
+
+def test_top_consumers_tool(mcp, tmp_path, monkeypatch):
+    seed(tmp_path, monkeypatch)
+    data = json.loads(call(mcp, "top_consumers", since="2026-01-01", limit=1)[0])
+    assert [r["session_id"] for r in data["rows"]] == ["aaa-111"]
+    md, err = call(mcp, "top_consumers", by="command", since="2026-01-01", format="markdown")
+    assert not err and md.startswith("| Command | Sessions |")
+    text, err = call(mcp, "top_consumers", limit=0)
+    assert err and "limit" in text

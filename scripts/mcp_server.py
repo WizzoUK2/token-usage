@@ -255,7 +255,40 @@ def tool_diff(args):
     return finish(data, tu.render_diff, args.get("format"))
 
 
-HANDLERS.update({"session_cost": tool_session_cost, "diff": tool_diff})
+def tool_history(args):
+    data = tu.run_history(by=args.get("by", "project"), since=args.get("since"),
+                          project=args.get("project"))
+    return finish(data, tu.render_history, args.get("format"))
+
+
+def tool_insights(args):
+    has_session = bool(args.get("transcript") or args.get("session_id"))
+    if has_session and args.get("since"):
+        raise ToolError("pass a transcript/session_id OR since, not both")
+    budget = args.get("budget_usd")
+    if budget is None:
+        try:
+            budget = float(os.environ["TOKEN_USAGE_BUDGET_USD"])
+        except (KeyError, ValueError):
+            budget = None
+    if args.get("since"):
+        data = tu.run_insights(since=args["since"], project=args.get("project"), budget=budget)
+    else:
+        t = pick_transcript(args.get("transcript"), args.get("session_id"))
+        data = tu.run_insights(transcript=str(t), budget=budget)
+        data["transcript"] = str(t)
+    return finish(data, tu.render_insights, args.get("format"))
+
+
+def tool_top_consumers(args):
+    data = tu.run_top_consumers(by=args.get("by", "session"), since=args.get("since", "30d"),
+                                project=args.get("project"), limit=args.get("limit", 10))
+    return finish(data, tu.render_top_consumers, args.get("format"))
+
+
+HANDLERS.update({"session_cost": tool_session_cost, "diff": tool_diff,
+                 "history": tool_history, "insights": tool_insights,
+                 "top_consumers": tool_top_consumers})
 
 
 if __name__ == "__main__":
