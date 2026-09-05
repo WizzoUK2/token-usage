@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "token-usage": {
+      "command": "python3",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/mcp_server.py"],
+      "env": {"TOKEN_USAGE_PROJECT_DIR": "${CLAUDE_PROJECT_DIR}"}
+    }
+  }
+}

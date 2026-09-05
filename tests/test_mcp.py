@@ -377,3 +377,46 @@ def test_insights_session_mode_falls_back_to_budget_env_var(mcp, tu, tmp_path, m
     monkeypatch.setenv("TOKEN_USAGE_BUDGET_USD", str(budget))
     data = json.loads(call(mcp, "insights", session_id="bbb-222")[0])
     assert any(f["rule"] == "budget-pace" for f in data["findings"])
+
+
+import subprocess
+import sys
+from pathlib import Path
+
+SERVER = Path(__file__).resolve().parent.parent / "scripts" / "mcp_server.py"
+PLUGIN_ROOT = SERVER.parent.parent
+
+
+def test_mcp_json_registers_server_with_plugin_root_paths():
+    cfg = json.loads((PLUGIN_ROOT / ".mcp.json").read_text())
+    srv = cfg["mcpServers"]["token-usage"]
+    assert srv["command"] == "python3"
+    assert srv["args"] == ["${CLAUDE_PLUGIN_ROOT}/scripts/mcp_server.py"]
+    assert srv["env"] == {"TOKEN_USAGE_PROJECT_DIR": "${CLAUDE_PROJECT_DIR}"}
+
+
+def test_end_to_end_over_pipes(tmp_path, monkeypatch):
+    proj, s1, s2 = seed(tmp_path, monkeypatch)
+    env = dict(os.environ, TOKEN_USAGE_PROJECTS_DIR=str(proj),
+               TOKEN_USAGE_LEDGER_DIR=str(tmp_path / "cache"),
+               TOKEN_USAGE_PROJECT_DIR="/Users/x/beta")
+    script = "\n".join(json.dumps(m) for m in [
+        req("initialize", id_=1, protocolVersion="2025-06-18", capabilities={},
+            clientInfo={"name": "pytest", "version": "0"}),
+        notif("notifications/initialized"),
+        req("tools/list", id_=2),
+        req("tools/call", id_=3, name="session_cost", arguments={}),
+        req("tools/call", id_=4, name="top_consumers",
+            arguments={"since": "2026-01-01", "format": "markdown"}),
+    ]) + "\n"
+    r = subprocess.run([sys.executable, str(SERVER)], input=script, capture_output=True,
+                       text=True, env=env, timeout=30)
+    assert r.returncode == 0, r.stderr
+    assert r.stderr == ""
+    replies = {m["id"]: m for m in (json.loads(l) for l in r.stdout.splitlines())}
+    assert set(replies) == {1, 2, 3, 4}
+    assert replies[1]["result"]["protocolVersion"] == "2025-06-18"
+    assert {t["name"] for t in replies[2]["result"]["tools"]} == TOOL_NAMES
+    cost = json.loads(replies[3]["result"]["content"][0]["text"])
+    assert cost["transcript"] == str(s2)                # TOKEN_USAGE_PROJECT_DIR honoured
+    assert replies[4]["result"]["content"][0]["text"].startswith("| Session | Project |")
