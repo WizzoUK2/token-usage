@@ -694,13 +694,6 @@ def check_projects_root(warnings=None):
     return str(root)
 
 
-def projects_dir_footnote(path):
-    """Markdown footnote for a corpus scan that had no projects root to read."""
-    if not path:
-        return None
-    return f"No readable Claude Code projects directory at {path} — nothing was scanned."
-
-
 def index_dir():
     return Path(os.environ.get("TOKEN_USAGE_LEDGER_DIR",
                                Path.home() / ".cache" / "token-usage")) / "index"
@@ -786,8 +779,8 @@ def cached_summary(path, pricing, warnings=None):
         message = f"cannot write summary cache {index_dir()}: {e}"
         if not _CACHE_WRITE_WARNED:
             _CACHE_WRITE_WARNED = True
-            warn(message, warnings)
-        elif warnings is not None and message not in warnings:
+            warn(message)
+        if warnings is not None and message not in warnings:
             warnings.append(message)
     return s, False
 
@@ -973,11 +966,26 @@ def render_history_csv(data):
     return buf.getvalue()
 
 
-def skipped_footnote(paths):
-    """Footnote naming transcripts the corpus scan could not read; None when none were."""
-    if not paths:
-        return None
-    return f"{len(paths)} transcript(s) skipped (unreadable): {', '.join(paths)}"
+def scan_footnotes(data, unpriced=True):
+    """Every footnote a corpus-scan result carries, in report order and already
+    filtered to the ones that apply: unpriced models, transcripts the scan
+    could not read, and a projects root it could not read at all (see
+    check_projects_root — "nothing here to read" is not "you spent nothing").
+
+    `unpriced=False` for renders with no cost figures to qualify — insights,
+    and a top-consumers table with no rows."""
+    models = data.get("unpriced_models") or []
+    skipped = data.get("skipped_transcripts") or []
+    root = data.get("projects_dir_missing")
+    notes = []
+    if unpriced and models:
+        notes.append(unpriced_footnote(models))
+    if skipped:
+        notes.append(f"{len(skipped)} transcript(s) skipped (unreadable): {', '.join(skipped)}")
+    if root:
+        notes.append(f"No readable Claude Code projects directory at {root} "
+                     "— nothing was scanned.")
+    return notes
 
 
 def _usage_cells(u, cost, partial=False):
@@ -1029,11 +1037,8 @@ def render_history(data):
     burn = burn_rate_line(total_cost, data.get("since"))
     if burn:
         lines += ["", burn]
-    for note in (unpriced_footnote(data.get("unpriced_models") or []),
-                 skipped_footnote(data.get("skipped_transcripts") or []),
-                 projects_dir_footnote(data.get("projects_dir_missing"))):
-        if note:
-            lines += ["", note]
+    for note in scan_footnotes(data):
+        lines += ["", note]
     return "\n".join(lines)
 
 
@@ -1047,7 +1052,8 @@ def run_top_consumers(by="session", since="30d", project=None, limit=10, warning
     sessions, commands = [], {}
     for s in iter_summaries(pricing, cutoff=cutoff, project=project, skipped=skipped,
                             warnings=warnings):
-        unpriced.update(unpriced_models(s.get("by_model", {}), pricing))
+        session_unpriced = unpriced_models(s.get("by_model", {}), pricing)
+        unpriced.update(session_unpriced)
         if by == "session":
             # "partial": some of this session's usage ran on an unpriced
             # model, so cost_usd is a priced subtotal — the session ranks on
@@ -1056,7 +1062,7 @@ def run_top_consumers(by="session", since="30d", project=None, limit=10, warning
                              "project": s["project"], "first_ts": s["first_ts"],
                              "usage": s["total"]["usage"],
                              "cost_usd": s["total"]["cost_usd"],
-                             "partial": bool(unpriced_models(s.get("by_model", {}), pricing))})
+                             "partial": bool(session_unpriced)})
             continue
         for label, agg in s["by_label"].items():
             c = commands.setdefault(label, {"label": label, "sessions": 0, "invocations": 0,
@@ -1093,9 +1099,7 @@ def render_top_consumers(data):
         # whether there was anything to read in the first place.
         empty = ("No commands in window." if data["by"] == "command"
                  else "No sessions in window.")
-        return "\n\n".join([empty] + [n for n in (
-            skipped_footnote(data.get("skipped_transcripts") or []),
-            projects_dir_footnote(data.get("projects_dir_missing"))) if n])
+        return "\n\n".join([empty] + scan_footnotes(data, unpriced=False))
     if data["by"] == "session":
         lines = ["| Session | Project | Started | Output | Input | Cache read | Cache write | Est. cost |",
                  "|---|---|---|---:|---:|---:|---:|---:|"]
@@ -1111,20 +1115,17 @@ def render_top_consumers(data):
             name = r["label"] if r["label"] == OTHER_LABEL else f"`{r['label']}`"
             lines.append(f"| {name} | {r['sessions']} | {r['invocations']} "
                          + _usage_cells(u, r["cost_usd"], r.get("partial")))
-    notes = [unpriced_footnote(data.get("unpriced_models") or []),
-             skipped_footnote(data.get("skipped_transcripts") or []),
-             projects_dir_footnote(data.get("projects_dir_missing"))]
-    note = partial_footnote(data["rows"], data["by"])
-    if note:
-        notes.append(note)
+    notes = scan_footnotes(data)
+    partial = partial_footnote(data["rows"], data["by"])
+    if partial:
+        notes.append(partial)
     if data["by"] == "session":
         shown = sum(1 for r in data["rows"] if r["cost_usd"] is None)
         cut = (data.get("unpriced_rows") or 0) - shown
         if cut > 0:
             notes.append(f"{cut} unpriced session(s) rank last and were cut by --limit.")
     for note in notes:
-        if note:
-            lines += ["", note]
+        lines += ["", note]
     return "\n".join(lines)
 
 
@@ -1146,6 +1147,11 @@ INSIGHT_MOVER_SHARE = 0.30          # one label explains >= 30% of the increase 
 
 def finding(rule, severity, message, **data):
     return {"rule": rule, "severity": severity, "message": message, "data": data}
+
+
+def sort_findings(findings):
+    """Report order: warnings before info, then by rule name."""
+    return sorted(findings, key=lambda f: ({"warn": 0, "info": 1}[f["severity"]], f["rule"]))
 
 
 def cache_ratio(u):
@@ -1270,9 +1276,7 @@ def session_insights(data, baseline, budget=None):
                 f"the Stop hook will nudge at ${budget:.2f}.",
                 cost=total_cost, budget=budget, share=round(pace, 3)))
 
-    order = {"warn": 0, "info": 1}
-    out.sort(key=lambda f: (order[f["severity"]], f["rule"]))
-    return out
+    return sort_findings(out)
 
 
 def window_halves(summaries, cutoff, now=None):
@@ -1355,9 +1359,7 @@ def window_insights(summaries, cutoff, pricing, now=None, halves=None):
             f"{', '.join(up)} unpriced — add rates to {user_pricing_path()} "
             "(window totals are understated).", models=up))
 
-    order = {"warn": 0, "info": 1}
-    out.sort(key=lambda f: (order[f["severity"]], f["rule"]))
-    return out
+    return sort_findings(out)
 
 
 def run_insights(transcript=None, since=None, project=None, budget=None, warnings=None):
@@ -1482,10 +1484,8 @@ def render_insights(result):
             lines.append(tail)
     else:
         lines = [" ".join(x for x in (insights_all_clear(result, session), caveat) if x)]
-    for note in (skipped_footnote(result.get("skipped_transcripts") or []),
-                 projects_dir_footnote(result.get("projects_dir_missing"))):
-        if note:
-            lines += ["", note]
+    for note in scan_footnotes(result, unpriced=False):
+        lines += ["", note]
     return "\n".join(lines)
 
 
