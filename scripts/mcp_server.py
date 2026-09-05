@@ -215,36 +215,76 @@ def serve(stdin=None, stdout=None):
 
 # --- tool handlers -----------------------------------------------------------
 
+def project_dir_from_env():
+    """The project dir to anchor default session resolution on, or None.
+
+    TOKEN_USAGE_PROJECT_DIR first (the plugin's .mcp.json sets it from
+    ${CLAUDE_PROJECT_DIR}), then CLAUDE_PROJECT_DIR itself, which Claude Code
+    exports to stdio MCP servers from 2.1.139 — so a user-scope registration
+    with no env block is anchored too. A value that is blank or still carries
+    an unexpanded "${...}" placeholder (older hosts, other clients) counts as
+    unset: an explicit project dir fails closed, so a bogus one would turn
+    every default call into an error instead of falling back to discovery."""
+    for name in ("TOKEN_USAGE_PROJECT_DIR", "CLAUDE_PROJECT_DIR"):
+        value = (os.environ.get(name) or "").strip()
+        if value and not value.startswith("${"):
+            return value
+    return None
+
+
+# Rungs that mean "nobody named this session; discovery guessed it".
+GUESSED_RUNGS = ("cwd", "any_project")
+
+
 def pick_transcript(path=None, session_id=None):
-    """Resolve a session per the spec order, or raise ToolError saying what was tried."""
+    """(transcript, rung) for a session selector, or ToolError saying what was
+    tried. Resolution order: see token_usage.locate_transcript_with_source
+    (authoritative)."""
     if path is not None and not path.strip():
         raise ToolError("transcript must not be blank")
     if session_id is not None and not session_id.strip():
         raise ToolError("session_id must not be blank")
-    project_dir = os.environ.get("TOKEN_USAGE_PROJECT_DIR") or None
-    t = tu.locate_transcript(path, session_id=session_id, project_dir=project_dir)
+    project_dir = project_dir_from_env()
+    t, via = tu.locate_transcript_with_source(path, session_id=session_id,
+                                              project_dir=project_dir)
     if t:
-        return t
-    if path:
+        return t, via
+    if via == "explicit":
         raise ToolError(f"transcript not found: {path}")
-    if session_id:
+    if via == "session_id":
         raise ToolError(f"no transcript for session id {session_id!r} under {tu.projects_dir()}")
+    if via == "env":
+        raise ToolError(f"TOKEN_USAGE_TRANSCRIPT is set to "
+                        f"{os.environ.get('TOKEN_USAGE_TRANSCRIPT')} "
+                        "but that file does not exist")
     where = f"{tu.projects_dir()}" + (f" (project dir {project_dir})" if project_dir else "")
     raise ToolError(f"no transcript found under {where}; pass transcript or session_id")
 
 
-def finish(data, render, fmt):
-    return render(data) if fmt == "markdown" else json.dumps(data)
+def guess_note(transcript, via):
+    """Markdown footnotes for a session nobody actually named."""
+    if via not in GUESSED_RUNGS:
+        return []
+    return [f"Note: no project dir was supplied; this is the newest transcript under "
+            f"{transcript.parent.name}, which may not be the session you meant."]
+
+
+def finish(data, render, fmt, footnotes=()):
+    """JSON payload, or the rendered markdown with each footnote as its own block."""
+    if fmt != "markdown":
+        return json.dumps(data)
+    return "\n\n".join([render(data), *footnotes])
 
 
 def tool_session_cost(args):
-    t = pick_transcript(args.get("transcript"), args.get("session_id"))
+    t, via = pick_transcript(args.get("transcript"), args.get("session_id"))
     data = tu.aggregate(tu.parse_session(t), tu.load_pricing())
     data["transcript"] = data["transcript_path"] = str(t)
+    data["resolved_via"] = via
     return finish(data,
                   lambda d: tu.render_report(d, show_agents=bool(args.get("agents")),
                                              show_models=bool(args.get("models"))),
-                  args.get("format"))
+                  args.get("format"), guess_note(t, via))
 
 
 def _looks_like_path(value):
@@ -259,7 +299,8 @@ def _path_or_id(value):
     """diff accepts either form per side: a path-shaped value is a path, else a session id."""
     if not value.strip():
         raise ToolError("old/new must not be blank")
-    return pick_transcript(path=value) if _looks_like_path(value) else pick_transcript(session_id=value)
+    return (pick_transcript(path=value) if _looks_like_path(value)
+            else pick_transcript(session_id=value))[0]
 
 
 def tool_diff(args):
@@ -283,13 +324,16 @@ def tool_insights(args):
     budget = args.get("budget_usd")
     if budget is None:
         budget = tu.budget_from_env()
+    footnotes = []
     if args.get("since"):
         data = tu.run_insights(since=args["since"], project=args.get("project"), budget=budget)
     else:
-        t = pick_transcript(args.get("transcript"), args.get("session_id"))
+        t, via = pick_transcript(args.get("transcript"), args.get("session_id"))
         data = tu.run_insights(transcript=str(t), budget=budget)
         data["transcript"] = str(t)
-    return finish(data, tu.render_insights, args.get("format"))
+        data["resolved_via"] = via
+        footnotes = guess_note(t, via)
+    return finish(data, tu.render_insights, args.get("format"), footnotes)
 
 
 def tool_top_consumers(args):

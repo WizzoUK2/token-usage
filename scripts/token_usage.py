@@ -1151,6 +1151,33 @@ def _cowork_roots():
     return roots
 
 
+def _find_latest_with_source(project_dir=None):
+    """(transcript, rung) for find_latest_transcript, (None, None) on a miss.
+
+    Rungs: "project_dir" (the caller named a project), "cwd", "cowork",
+    "any_project" — the last two only reachable without a project dir."""
+    root = projects_dir()
+    explicit = project_dir is not None
+    target = Path(project_dir).expanduser().resolve() if explicit else Path.cwd()
+    # 1) Claude Code: <projects>/<slug>/*.jsonl
+    slug_dir = root / project_slug(str(target))
+    if slug_dir.is_dir():
+        f = _newest(slug_dir.glob("*.jsonl"))
+        if f:
+            return f, ("project_dir" if explicit else "cwd")
+    if explicit:
+        return None, None
+    # 2) Cowork (Claude desktop app).
+    for r in _cowork_roots():
+        if r.is_dir():
+            f = _newest(r.glob("*/*.jsonl"))
+            if f:
+                return f, "cowork"
+    # 3) No project context at all: newest transcript on the machine.
+    f = _newest(root.glob("*/*.jsonl")) if root.is_dir() else None
+    return (f, "any_project") if f else (None, None)
+
+
 def find_latest_transcript(project_dir=None):
     """Newest transcript for a project, or None.
 
@@ -1162,42 +1189,41 @@ def find_latest_transcript(project_dir=None):
     An *explicit* project_dir only ever looks at that project's own
     directory — if it has no transcripts, that's None, not a guess at some
     other project's session."""
-    root = projects_dir()
-    explicit = project_dir is not None
-    target = Path(project_dir).expanduser().resolve() if explicit else Path.cwd()
-    # 1) Claude Code: <projects>/<slug>/*.jsonl
-    slug_dir = root / project_slug(str(target))
-    if slug_dir.is_dir():
-        f = _newest(slug_dir.glob("*.jsonl"))
-        if f:
-            return f
-    if explicit:
-        return None
-    # 2) Cowork (Claude desktop app).
-    for r in _cowork_roots():
-        if r.is_dir():
-            f = _newest(r.glob("*/*.jsonl"))
-            if f:
-                return f
-    # 3) No project context at all: newest transcript on the machine.
-    return _newest(root.glob("*/*.jsonl")) if root.is_dir() else None
+    return _find_latest_with_source(project_dir)[0]
 
 
-def locate_transcript(arg=None, session_id=None, project_dir=None):
-    """Transcript to analyse, or None. Explicit path (must exist) > session id
-    (searched across every project) > TOKEN_USAGE_TRANSCRIPT (must exist) >
-    newest for the project dir (see find_latest_transcript)."""
+def locate_transcript_with_source(arg=None, session_id=None, project_dir=None):
+    """(transcript, rung) — the transcript to analyse and which rung produced it.
+
+    Order: "explicit" (arg, must exist) > "session_id" (globbed across every
+    project; several matches pick the newest by mtime, and the id is sanitised
+    to [A-Za-z0-9_-] so it can never escape the projects dir) >
+    "env" (TOKEN_USAGE_TRANSCRIPT, must exist) > discovery
+    ("project_dir" / "cwd" / "cowork" / "any_project", see
+    find_latest_transcript).
+
+    On a miss the rung names the selector that stopped the search — an
+    explicit path, a session id and TOKEN_USAGE_TRANSCRIPT all fail closed
+    rather than falling through, so callers can say *which* one was wrong —
+    and is None when discovery simply found nothing."""
     if arg:
         p = Path(arg)
-        return p if p.is_file() else None
+        return (p if p.is_file() else None), "explicit"
     if session_id:
         safe = re.sub(r"[^A-Za-z0-9_-]", "", str(session_id))
-        return _newest(projects_dir().glob(f"*/{safe}.jsonl")) if safe else None
+        return (_newest(projects_dir().glob(f"*/{safe}.jsonl")) if safe else None), "session_id"
     env = os.environ.get("TOKEN_USAGE_TRANSCRIPT")
     if env:
         p = Path(env)
-        return p if p.is_file() else None
-    return find_latest_transcript(project_dir)
+        return (p if p.is_file() else None), "env"
+    return _find_latest_with_source(project_dir)
+
+
+def locate_transcript(arg=None, session_id=None, project_dir=None):
+    """Transcript to analyse, or None. locate_transcript_with_source documents
+    the (authoritative) resolution order."""
+    return locate_transcript_with_source(arg, session_id=session_id,
+                                         project_dir=project_dir)[0]
 
 
 def budget_from_env():
@@ -1210,13 +1236,16 @@ def budget_from_env():
 
 
 def resolve_transcript(arg):
-    t = locate_transcript(arg)
+    t, via = locate_transcript_with_source(arg)
     if t:
         return t
-    if arg:
+    if via == "explicit":
         # A path *was* passed, so "pass a path" is the wrong advice: the file
         # is simply not there (typo, stale path, wrong machine).
         sys.exit(f"token-usage: transcript not found: {arg}")
+    if via == "env":
+        sys.exit(f"token-usage: TOKEN_USAGE_TRANSCRIPT is set to "
+                 f"{os.environ.get('TOKEN_USAGE_TRANSCRIPT')} but that file does not exist")
     sys.exit("token-usage: no transcript found — pass a path to a session .jsonl file")
 
 

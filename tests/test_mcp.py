@@ -472,3 +472,80 @@ def test_end_to_end_over_pipes(tmp_path, monkeypatch):
     cost = json.loads(replies[3]["result"]["content"][0]["text"])
     assert cost["transcript"] == str(s2)                # TOKEN_USAGE_PROJECT_DIR honoured
     assert replies[4]["result"]["content"][0]["text"].startswith("| Session | Project |")
+
+
+def test_project_dir_from_env_treats_unexpanded_and_blank_as_unset(mcp, monkeypatch):
+    # ${CLAUDE_PROJECT_DIR} only reaches stdio MCP servers from Claude Code
+    # 2.1.139; older builds leave the literal placeholder (or an empty string)
+    # in the env, and an explicit project dir fails closed — so anything that
+    # isn't a real path must read as "no project dir" and fall back to discovery.
+    monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+    for raw in ("${CLAUDE_PROJECT_DIR}", "", "   "):
+        monkeypatch.setenv("TOKEN_USAGE_PROJECT_DIR", raw)
+        assert mcp.project_dir_from_env() is None, raw
+    monkeypatch.setenv("TOKEN_USAGE_PROJECT_DIR", " /Users/x/alpha ")
+    assert mcp.project_dir_from_env() == "/Users/x/alpha"
+    # Claude Code exports CLAUDE_PROJECT_DIR to stdio servers too, so a
+    # user-scope registration with no env block still gets a project anchor.
+    monkeypatch.delenv("TOKEN_USAGE_PROJECT_DIR")
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/x/beta")
+    assert mcp.project_dir_from_env() == "/Users/x/beta"
+    monkeypatch.setenv("TOKEN_USAGE_PROJECT_DIR", "${CLAUDE_PROJECT_DIR}")
+    assert mcp.project_dir_from_env() == "/Users/x/beta"
+
+
+def test_session_cost_survives_an_unexpanded_or_blank_project_dir(mcp, tmp_path, monkeypatch):
+    proj, s1, s2 = seed(tmp_path, monkeypatch)
+    monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+    for raw in ("${CLAUDE_PROJECT_DIR}", ""):
+        monkeypatch.setenv("TOKEN_USAGE_PROJECT_DIR", raw)
+        data = json.loads(call(mcp, "session_cost")[0])
+        assert data["transcript"] == str(s2), raw       # newest anywhere, via discovery
+        assert data["resolved_via"] == "any_project"
+
+
+def test_session_cost_falls_back_to_claude_project_dir(mcp, tmp_path, monkeypatch):
+    proj, s1, s2 = seed(tmp_path, monkeypatch)
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/Users/x/alpha")
+    data = json.loads(call(mcp, "session_cost")[0])
+    assert data["transcript"] == str(s1) and data["resolved_via"] == "project_dir"
+
+
+def test_session_cost_reports_the_rung_and_flags_a_guess(mcp, tmp_path, monkeypatch):
+    proj, s1, s2 = seed(tmp_path, monkeypatch)
+    monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+    assert json.loads(call(mcp, "session_cost", transcript=str(s1))[0])["resolved_via"] == "explicit"
+    assert json.loads(call(mcp, "session_cost", session_id="bbb-222")[0])["resolved_via"] == "session_id"
+    # A guessed session (no project dir) says so in markdown as well as JSON.
+    md, err = call(mcp, "session_cost", format="markdown")
+    assert not err
+    assert "no project dir was supplied" in md and s2.parent.name in md
+    # A session the caller named is not a guess, so no note.
+    md, err = call(mcp, "session_cost", transcript=str(s1), format="markdown")
+    assert "no project dir was supplied" not in md
+
+
+def test_insights_reports_the_rung_and_flags_a_guess(mcp, tmp_path, monkeypatch):
+    proj, s1, s2 = seed(tmp_path, monkeypatch)
+    monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+    data = json.loads(call(mcp, "insights")[0])
+    assert data["resolved_via"] == "any_project"
+    md, err = call(mcp, "insights", format="markdown")
+    assert not err and "no project dir was supplied" in md
+
+
+def test_broken_env_transcript_is_diagnosed(mcp, tmp_path, monkeypatch):
+    proj, s1, s2 = seed(tmp_path, monkeypatch)
+    gone = tmp_path / "gone.jsonl"
+    monkeypatch.setenv("TOKEN_USAGE_TRANSCRIPT", str(gone))
+    text, err = call(mcp, "session_cost")
+    assert err and text == (f"TOKEN_USAGE_TRANSCRIPT is set to {gone} "
+                            "but that file does not exist")
+
+
+def test_nothing_found_names_projects_dir_project_dir_and_session_id(mcp, tmp_path, monkeypatch):
+    proj, s1, s2 = seed(tmp_path, monkeypatch)
+    monkeypatch.setenv("TOKEN_USAGE_PROJECT_DIR", "/Users/x/no-sessions-yet")
+    text, err = call(mcp, "session_cost")
+    assert err
+    assert str(proj) in text and "/Users/x/no-sessions-yet" in text and "session_id" in text

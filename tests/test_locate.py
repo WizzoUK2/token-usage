@@ -120,3 +120,69 @@ def test_resolve_transcript_names_the_path_the_user_passed(tu, tmp_path, monkeyp
     with pytest.raises(SystemExit) as e:
         tu.resolve_transcript(str(missing))
     assert str(e.value) == f"token-usage: transcript not found: {missing}"
+
+
+def test_locate_with_source_names_the_rung_that_answered(tu, tmp_path, monkeypatch):
+    # Callers that guessed the session (cwd / any-project) have to say so, so
+    # resolution reports which rung answered alongside the path.
+    proj, a, b = seed(tmp_path, monkeypatch, tu)
+    assert tu.locate_transcript_with_source(str(a)) == (a, "explicit")
+    assert tu.locate_transcript_with_source(session_id="aaa-111") == (a, "session_id")
+    assert tu.locate_transcript_with_source(project_dir="/Users/x/alpha") == (a, "project_dir")
+
+    monkeypatch.setenv("TOKEN_USAGE_TRANSCRIPT", str(a))
+    assert tu.locate_transcript_with_source() == (a, "env")
+    monkeypatch.delenv("TOKEN_USAGE_TRANSCRIPT")
+
+    # cwd's own project directory.
+    cwd_dir = tmp_path / "work"
+    cwd_dir.mkdir()
+    c = write_jsonl(proj / tu.project_slug(str(cwd_dir)) / "ccc-333.jsonl", [
+        user("2026-06-13T10:00:00Z"),
+        assistant("2026-06-13T10:00:01Z", usage(out=30), request_id="r3"),
+    ])
+    os.utime(c, (1_699_000_000, 1_699_000_000))  # keep b the newest overall
+    monkeypatch.chdir(cwd_dir)
+    assert tu.locate_transcript_with_source() == (c, "cwd")
+
+    # Cowork sandbox mount.
+    monkeypatch.chdir(tmp_path)
+    mount = tmp_path / "mnt" / ".claude" / "projects"
+    d = write_jsonl(mount / "-Users-x-cowork" / "ddd-444.jsonl", [
+        user("2026-06-14T10:00:00Z"),
+        assistant("2026-06-14T10:00:01Z", usage(out=40), request_id="r4"),
+    ])
+    monkeypatch.setattr(tu, "_cowork_roots", lambda: [mount])
+    assert tu.locate_transcript_with_source() == (d, "cowork")
+
+    # Newest anywhere.
+    monkeypatch.setattr(tu, "_cowork_roots", lambda: [])
+    assert tu.locate_transcript_with_source() == (b, "any_project")
+
+
+def test_locate_with_source_reports_the_rung_that_failed_closed(tu, tmp_path, monkeypatch):
+    proj, a, b = seed(tmp_path, monkeypatch, tu)
+    gone = str(tmp_path / "gone.jsonl")
+    assert tu.locate_transcript_with_source(gone) == (None, "explicit")
+    assert tu.locate_transcript_with_source(session_id="nope-999") == (None, "session_id")
+    monkeypatch.setenv("TOKEN_USAGE_TRANSCRIPT", gone)
+    assert tu.locate_transcript_with_source() == (None, "env")
+    monkeypatch.delenv("TOKEN_USAGE_TRANSCRIPT")
+    # An explicit project dir with no sessions, and discovery finding nothing
+    # at all, are plain misses — no rung claims them.
+    assert tu.locate_transcript_with_source(project_dir="/Users/x/nothing") == (None, None)
+    monkeypatch.setenv("TOKEN_USAGE_PROJECTS_DIR", str(tmp_path / "empty"))
+    monkeypatch.chdir(tmp_path)
+    assert tu.locate_transcript_with_source() == (None, None)
+
+
+def test_resolve_transcript_diagnoses_a_broken_env_transcript(tu, tmp_path, monkeypatch):
+    # "no transcript found" is the wrong diagnosis when TOKEN_USAGE_TRANSCRIPT
+    # points at a file that isn't there — name the variable and its value.
+    proj, a, b = seed(tmp_path, monkeypatch, tu)
+    gone = tmp_path / "gone.jsonl"
+    monkeypatch.setenv("TOKEN_USAGE_TRANSCRIPT", str(gone))
+    with pytest.raises(SystemExit) as e:
+        tu.resolve_transcript(None)
+    assert str(e.value) == (f"token-usage: TOKEN_USAGE_TRANSCRIPT is set to {gone} "
+                            "but that file does not exist")
