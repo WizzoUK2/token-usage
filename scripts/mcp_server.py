@@ -262,7 +262,9 @@ def _resilient_stdin():
             sys.stdin.reconfigure(errors="replace")
         except (AttributeError, ValueError, OSError):
             pass
-        return sys.stdin
+        # Started with stdin closed, sys.stdin is None and serve() would do
+        # `for line in None`: an empty stream ends the loop cleanly instead.
+        return sys.stdin if sys.stdin is not None else io.StringIO()
 
 
 def serve(stdin=None, stdout=None):

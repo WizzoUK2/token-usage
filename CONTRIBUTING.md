@@ -35,13 +35,18 @@ python3 scripts/token_usage.py json  path/to/session.jsonl
 
 ## Testing a change
 
-Run the suite on both supported interpreters, with warnings as errors — this
-is exactly what CI gates on:
+Run the suite on both supported interpreters, with warnings as errors. CI
+runs exactly these three commands on a 3.9 / 3.12 matrix (`ruff==0.16.6`):
 
 ```bash
-python3 -m pytest tests/ -q -W error       # stdlib fixtures only, no network
-python3 -m ruff check scripts tests
+python3.9  -m pytest tests/ -v -W error    # the floor: no 3.10+ syntax
+python3.12 -m pytest tests/ -v -W error    # stdlib fixtures only, no network
+ruff check scripts tests
 ```
+
+On macOS the 3.9 interpreter is `/usr/bin/python3`; any 3.9 and any ≥3.10
+interpreter you have will do, and `-q` is fine locally — CI uses `-v` only for
+readable logs.
 
 Then verify against real transcripts:
 

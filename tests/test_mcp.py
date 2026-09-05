@@ -818,13 +818,36 @@ def test_missing_projects_root_reaches_mcp_warnings(mcp, tmp_path, monkeypatch):
     assert not err
     data = json.loads(text)
     assert data["projects_dir_missing"] == str(tmp_path / "nope")
-    assert data["warnings"] == [f"no Claude Code projects directory at {tmp_path / 'nope'}"]
+    assert data["warnings"] == [f"no readable Claude Code projects directory at {tmp_path / 'nope'}"]
     md, _err = call(mcp, "top_consumers", format="markdown")
-    assert f"No Claude Code projects directory at {tmp_path / 'nope'}" in md
-    assert f"Warning: no Claude Code projects directory at {tmp_path / 'nope'}" in md
+    assert f"No readable Claude Code projects directory at {tmp_path / 'nope'}" in md
+    assert f"Warning: no readable Claude Code projects directory at {tmp_path / 'nope'}" in md
 
 
 def test_check_since_rejects_a_calendar_invalid_date(mcp, tmp_path, monkeypatch):
     seed(tmp_path, monkeypatch)
     text, err = call(mcp, "history", since="2026-09-31")
     assert err and text == "invalid since value '2026-09-31' — use Nd (e.g. 7d) or YYYY-MM-DD"
+
+
+def test_overflowing_since_is_a_tool_error_not_a_traceback(mcp, tmp_path, monkeypatch, capsys):
+    # timedelta(days=999999999999) raised OverflowError inside the tool: the
+    # caller got an isError whose whole text was "Python int too large to
+    # convert to C int" and the server — documented as writing nothing to
+    # stderr on the happy path — printed a traceback.
+    seed(tmp_path, monkeypatch)
+    for tool in ("history", "top_consumers", "insights"):
+        text, err = call(mcp, tool, since="999999999999d")
+        assert err is True, tool
+        assert "invalid since value '999999999999d'" in text, tool
+    assert "Traceback" not in capsys.readouterr().err
+
+
+def test_serve_exits_cleanly_when_stdin_is_none(mcp, monkeypatch):
+    # A process started with stdin closed (`python mcp_server.py 0<&-`) gets
+    # sys.stdin is None; both _resilient_stdin fallbacks handed that straight
+    # back and serve() did `for line in None` — TypeError, rc=1.
+    monkeypatch.setattr(sys, "stdin", None)
+    out = io.StringIO()
+    mcp.serve(stdout=out)                                    # must return, not raise
+    assert out.getvalue() == ""

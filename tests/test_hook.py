@@ -286,3 +286,24 @@ def test_hook_survives_an_ascii_stdio_encoding(tmp_path):
     assert "budget" in json.loads(r.stdout.decode())["systemMessage"]
     ledger = json.loads((tmp_path / "ledger" / "loc-1.json").read_text())
     assert ledger["total"]["cost_usd"] == 50.0
+
+
+def test_hook_survives_a_closed_stdout_pipe(tmp_path):
+    # print() only buffers: CPython flushes sys.stdout at INTERPRETER SHUTDOWN,
+    # after run_hook's `except Exception` has already returned 0, so a reader
+    # that closed the pipe turned a successful hook into rc=120 plus
+    # "Exception ignored on flushing sys.stdout" — a broken session for a
+    # reason no channel explains.
+    t = make_transcript(tmp_path, out_tokens=1_000_000)       # ≈ $50: the nudge prints
+    env = {**os.environ, "TOKEN_USAGE_LEDGER_DIR": str(tmp_path / "ledger"),
+           "TOKEN_USAGE_BUDGET_USD": "10"}
+    p = subprocess.Popen([sys.executable, str(SCRIPT), "hook"], stdin=subprocess.PIPE,
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
+    p.stdout.close()                                          # the reader is gone
+    p.stdin.write(json.dumps({"session_id": "pipe-1", "transcript_path": str(t)}).encode())
+    p.stdin.close()
+    err = p.stderr.read().decode()
+    p.stderr.close()
+    assert p.wait() == 0, err
+    assert "Exception ignored" not in err and "BrokenPipeError" not in err
+    assert json.loads((tmp_path / "ledger" / "pipe-1.json").read_text())["budget_notified"]

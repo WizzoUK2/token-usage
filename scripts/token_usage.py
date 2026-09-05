@@ -276,20 +276,55 @@ def is_user_prompt(entry):
     return True
 
 
+class UnreadableTranscript(ValueError):
+    """A .jsonl file that yielded no JSON at all (binary, or wholly
+    undecodable). A ValueError so iter_summaries' existing skip-and-disclose
+    branch catches it: such a file is a *skipped transcript*, never a
+    zero-usage session the corpus scan then counts."""
+
+
+_UNDECODABLE_WARNED = set()
+
+
 def iter_jsonl(path):
-    # errors="replace": a transcript with a few undecodable bytes must still
-    # parse (the affected line simply fails json.loads and is skipped) rather
-    # than turning every reader — report, the hook, the corpus scan — into a
-    # UnicodeDecodeError traceback.
-    with open(path, encoding="utf-8", errors="replace") as fh:
-        for line in fh:
-            line = line.strip()
+    """Yield the JSON objects in a .jsonl transcript, one line at a time.
+
+    Decoded per line rather than by the file object: a transcript with a few
+    undecodable bytes must still yield its good lines (the affected line is
+    replacement-decoded, then usually fails json.loads) rather than turning
+    every reader — report, the hook, the corpus scan — into a
+    UnicodeDecodeError traceback. Lines lost that way are counted and warned
+    about once per file, because a silently vanished turn is a silently wrong
+    number."""
+    undecodable = 0
+    with open(path, "rb") as fh:
+        for raw in fh:
+            try:
+                line = raw.decode("utf-8").strip()
+            except UnicodeDecodeError:
+                undecodable += 1
+                line = raw.decode("utf-8", errors="replace").strip()
             if not line:
                 continue
             try:
                 yield json.loads(line)
             except json.JSONDecodeError:
                 continue
+    # Once per file: summarize_transcript alone makes two passes, and a
+    # long-lived MCP server re-reads the same transcript on every query.
+    if undecodable and str(path) not in _UNDECODABLE_WARNED:
+        _UNDECODABLE_WARNED.add(str(path))
+        warn(f"{path}: {undecodable} line(s) had undecodable bytes")
+
+
+def _has_entries(path):
+    """True if at least one line of `path` parses as JSON. Stops at the first
+    one, so the common case reads a single buffer."""
+    gen = iter_jsonl(path)
+    try:
+        return next(gen, None) is not None
+    finally:
+        gen.close()      # abandoned early: no partial undecodable-line count
 
 
 def sum_transcript(path):
@@ -642,18 +677,20 @@ def projects_dir():
 
 
 def check_projects_root(warnings=None):
-    """The projects root as a string when it is NOT a readable directory
-    (missing, a regular file, a stale mount), else None.
+    """The projects root as a string when it is not a directory this process
+    can list — missing, a regular file, a stale mount, or a directory without
+    read+execute permission — else None.
 
-    Path.glob() on a non-existent path or a file yields nothing rather than
-    raising, so a mistyped TOKEN_USAGE_PROJECTS_DIR, an MCP server started
-    with a different HOME or an unmounted sandbox made the whole corpus scan
-    report a clean, successful, empty result. "There is nothing here to read"
-    is not the same answer as "you spent nothing"."""
+    Path.glob() yields nothing rather than raising for every one of those (it
+    swallows the PermissionError too), so a mistyped TOKEN_USAGE_PROJECTS_DIR,
+    an MCP server started with a different HOME, an unmounted sandbox or a
+    chmod 000 directory made the whole corpus scan report a clean, successful,
+    empty result. "There is nothing here to read" is not the same answer as
+    "you spent nothing"."""
     root = projects_dir()
-    if root.is_dir():
+    if root.is_dir() and os.access(root, os.R_OK | os.X_OK):
         return None
-    warn(f"no Claude Code projects directory at {root}", warnings)
+    warn(f"no readable Claude Code projects directory at {root}", warnings)
     return str(root)
 
 
@@ -661,7 +698,7 @@ def projects_dir_footnote(path):
     """Markdown footnote for a corpus scan that had no projects root to read."""
     if not path:
         return None
-    return f"No Claude Code projects directory at {path} — nothing was scanned."
+    return f"No readable Claude Code projects directory at {path} — nothing was scanned."
 
 
 def index_dir():
@@ -680,6 +717,11 @@ def summarize_transcript(path, pricing, st=None):
     # Stat BEFORE parsing: if the transcript is appended mid-parse, the recorded
     # mtime is then stale and the next run re-parses — never a silently stale cache.
     st = st or path.stat()
+    # A non-empty file that parses to nothing (binary, or wholly undecodable)
+    # would otherwise become a summary with no usage — which every corpus scan
+    # then COUNTS as a real, free session.
+    if st.st_size and not _has_entries(path):
+        raise UnreadableTranscript("no JSON lines")
     segs = parse_session(path)
     data = aggregate(segs, pricing)
     day_models = sum_by_day(path)
@@ -750,10 +792,22 @@ def cached_summary(path, pricing, warnings=None):
     return s, False
 
 
+# 100 years. timedelta(days=999999999999) raises OverflowError and
+# datetime.now() - timedelta(days=3652058) leaves the date range, so an
+# uncapped Nd turned a typo into a traceback (and, through MCP, into an
+# isError reading "Python int too large to convert to C int").
+MAX_SINCE_DAYS = 36500
+
+
 def _since_days(arg):
-    """Day count of a relative 'Nd' --since value, or None if not that form."""
+    """Day count of a relative 'Nd' --since value, or None if not that form —
+    including a count past MAX_SINCE_DAYS, which since_cutoff then rejects
+    with the ordinary 'invalid --since value' message."""
     m = re.fullmatch(r"(\d+)d", arg or "")
-    return int(m.group(1)) if m else None
+    if not m:
+        return None
+    days = int(m.group(1))
+    return days if days <= MAX_SINCE_DAYS else None
 
 
 def since_cutoff(arg, flag="--since"):
@@ -831,8 +885,9 @@ def iter_summaries(pricing, cutoff=None, project=None, exclude=None, progress=Fa
         try:
             s, hit = cached_summary(f, pricing, warnings)
         except (OSError, ValueError, AttributeError) as e:
-            # OSError: unreadable/a directory. ValueError: UnicodeDecodeError
-            # and malformed JSON. AttributeError: a cache entry of the wrong shape.
+            # OSError: unreadable/a directory. ValueError: UnreadableTranscript
+            # (a transcript that parsed to nothing) and a corrupt cache entry's
+            # own json.loads. AttributeError: a cache entry of the wrong shape.
             warn(f"skipping unreadable transcript {f}: {e}")
             if skipped is not None:
                 skipped.append(str(f))
@@ -1642,10 +1697,32 @@ def run_hook():
     traceback here breaks the user's session, so no exception class may
     escape — not even from the diagnostics."""
     try:
-        return _run_hook(_hook_payload())
+        rc = _run_hook(_hook_payload())
+        _flush_stdout()
+        return rc
     except Exception as e:  # noqa: BLE001 — a hook must never break the session
         _hook_warn(f"hook: {type(e).__name__}: {e}")
         return 0
+
+
+def _flush_stdout():
+    """Flush stdout here, where a failure can still be handled.
+
+    print() only buffers; CPython flushes sys.stdout at interpreter shutdown,
+    long after `return 0`, and a reader that has closed the pipe turned a
+    successful hook into rc=120 plus "Exception ignored on flushing
+    sys.stdout". Pointing the fd at /dev/null drops the undeliverable buffer
+    so that second flush cannot fail."""
+    try:
+        sys.stdout.flush()
+    except OSError:
+        try:
+            fd = os.open(os.devnull, os.O_WRONLY)
+            os.dup2(fd, sys.stdout.fileno())
+            os.close(fd)
+            sys.stdout.flush()
+        except (OSError, ValueError, AttributeError):
+            pass
 
 
 def _run_hook(payload):

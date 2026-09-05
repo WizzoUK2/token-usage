@@ -148,7 +148,10 @@ adheres to [Semantic Versioning](https://semver.org/).
   `TOKEN_USAGE_LEDGER_DIR` / `~/.cache/token-usage` (read-only home, a
   root-owned directory, a full disk) killed the budget nudge with no output
   on any channel; the hook now warns on stderr
-  (`token-usage: hook: ledger update failed: …`) and still exits 0.
+  (`token-usage: hook: ledger update failed: …`) and still exits 0. It also
+  flushes stdout while a failure can still be handled: a reader that closed
+  the pipe used to turn a successful hook into rc=120 at interpreter
+  shutdown, long after the hook body returned.
 - **A broken `TOKEN_USAGE_TRANSCRIPT` is diagnosed by name.** Both the CLI and
   the MCP server used to answer "no transcript found"; they now say
   `TOKEN_USAGE_TRANSCRIPT is set to <path> but that file does not exist`.
@@ -178,15 +181,22 @@ adheres to [Semantic Versioning](https://semver.org/).
   the hook and the corpus scan all survive a corrupt line instead of exiting
   1 on it. The MCP server reads its stdin the same way: one 0xff byte used to
   kill the process with rc=1 and *zero* replies, losing valid requests queued
-  ahead of it, where it is now an ordinary `-32700` parse error.
-- **A missing projects directory is disclosed, not answered with zeros.**
-  `Path.glob()` on a non-existent path — or on a regular file — yields
-  nothing rather than raising, so a mistyped `TOKEN_USAGE_PROJECTS_DIR`, an
-  MCP server started with a different `HOME` or an unmounted sandbox answered
-  "what did I spend this week" with a clean, successful, empty table. Every
+  ahead of it, where it is now an ordinary `-32700` parse error. The loss is
+  disclosed rather than absorbed: a transcript warns once on stderr
+  (`token-usage: <path>: N line(s) had undecodable bytes`) for the lines it
+  dropped, and a transcript that decodes to nothing parseable at all stays a
+  *skipped* transcript — warned about, listed in `skipped_transcripts` and
+  never counted in the Calls column as a free session.
+- **A projects directory that cannot be read is disclosed, not answered with
+  zeros.** `Path.glob()` on a non-existent path — or on a regular file, or on
+  a directory this process may not list (`chmod 000`, a permission-denied
+  mount) — yields nothing rather than raising, so a mistyped
+  `TOKEN_USAGE_PROJECTS_DIR`, an MCP server started with a different `HOME` or
+  an unmounted sandbox answered "what did I spend this week" with a clean,
+  successful, empty table. Every
   corpus-scanning entry point (`history`, `top_consumers`, window `insights`,
   the `insights` baseline) now reports `projects_dir_missing` in `--json`,
-  footnotes `No Claude Code projects directory at <path> — nothing was
+  footnotes `No readable Claude Code projects directory at <path> — nothing was
   scanned.` in markdown, warns on stderr and passes it to MCP `warnings`.
 - **A calendar-invalid `--since` is rejected instead of crashing.**
   `--since 2026-09-31` (September has 30 days; likewise `2026-02-30`,
@@ -195,7 +205,10 @@ adheres to [Semantic Versioning](https://semver.org/).
   `ValueError: day is out of range for month`, while `history` took the same
   value and silently matched nothing. Both now say
   `invalid --since value '…' — use Nd (e.g. 7d) or YYYY-MM-DD` (`invalid
-  since value …` over MCP).
+  since value …` over MCP). A relative window is capped at 36500d (100 years)
+  for the same reason: `--since 999999999999d` overflowed `timedelta` and
+  exited 1 with an `OverflowError` traceback (over MCP, an `isError` reading
+  "Python int too large to convert to C int").
 - **Pricing rates must be finite and non-negative.** `json.loads` accepts the
   bare `NaN`/`Infinity` literals (and `1e400` overflows to `inf`), so a user
   overlay carrying one produced a `"cost_usd": NaN` in the MCP JSON payload —

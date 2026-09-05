@@ -111,8 +111,8 @@ Every result carries:
 | Key | Meaning |
 |---|---|
 | `warnings` | Non-fatal problems that changed the numbers (malformed pricing overlay or entry, an unwritable summary cache, a bad `TOKEN_USAGE_BUDGET_USD`, a missing projects root). Markdown: one `Warning: <text>` block each. |
-| `skipped_transcripts` | Paths the corpus scan could not read (corpus-scanning tools and both `insights` modes). Markdown: a `N transcript(s) skipped (unreadable): …` footnote. |
-| `projects_dir_missing` | The projects root when it is not a directory at all, else `null` — an empty table is otherwise indistinguishable from "you spent nothing". Markdown: `No Claude Code projects directory at <path> — nothing was scanned.` |
+| `skipped_transcripts` | Paths the corpus scan could not read or could not parse at all — an unreadable file, or one that decoded to no JSON (corpus-scanning tools and both `insights` modes). Markdown: a `N transcript(s) skipped (unreadable): …` footnote. |
+| `projects_dir_missing` | The projects root when it is not a directory this process can list (missing, a regular file, or unreadable), else `null` — an empty table is otherwise indistinguishable from "you spent nothing". Markdown: `No readable Claude Code projects directory at <path> — nothing was scanned.` |
 
 `session_cost` and `insights` (session mode) additionally carry `transcript`
 (the path analysed) and `resolved_via` (the resolution rung), and their

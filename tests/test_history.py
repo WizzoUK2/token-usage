@@ -363,17 +363,17 @@ def test_missing_projects_root_is_disclosed_not_an_empty_table(tu, tmp_path, mon
         monkeypatch.setenv("TOKEN_USAGE_PROJECTS_DIR", str(root))
         hist = tu.run_history(by="project")
         assert hist["rows"] == [] and hist["projects_dir_missing"] == str(root)
-        assert f"No Claude Code projects directory at {root}" in tu.render_history(hist)
+        assert f"No readable Claude Code projects directory at {root}" in tu.render_history(hist)
         top = tu.run_top_consumers(since="30d")
         assert top["rows"] == [] and top["projects_dir_missing"] == str(root)
-        assert f"No Claude Code projects directory at {root}" in tu.render_top_consumers(top)
+        assert f"No readable Claude Code projects directory at {root}" in tu.render_top_consumers(top)
         window = tu.run_insights(since="30d")
         assert window["projects_dir_missing"] == str(root)
-        assert f"No Claude Code projects directory at {root}" in tu.render_insights(window)
-        assert "no Claude Code projects directory" in capsys.readouterr().err
+        assert f"No readable Claude Code projects directory at {root}" in tu.render_insights(window)
+        assert "no readable Claude Code projects directory" in capsys.readouterr().err
         warnings = []
         tu.run_history(by="project", warnings=warnings)
-        assert warnings == [f"no Claude Code projects directory at {root}"]
+        assert warnings == [f"no readable Claude Code projects directory at {root}"]
         capsys.readouterr()
 
 
@@ -389,7 +389,7 @@ def test_missing_projects_root_reaches_session_mode_insights(tu, tmp_path, monke
     monkeypatch.setenv("TOKEN_USAGE_LEDGER_DIR", str(tmp_path / "cache"))
     r = tu.run_insights(transcript=str(t))
     assert r["projects_dir_missing"] == str(tmp_path / "nope")
-    assert f"No Claude Code projects directory at {tmp_path / 'nope'}" in tu.render_insights(r)
+    assert f"No readable Claude Code projects directory at {tmp_path / 'nope'}" in tu.render_insights(r)
     capsys.readouterr()
 
 
@@ -461,3 +461,72 @@ def test_non_positive_budget_env_is_reported(tu, monkeypatch):
     monkeypatch.setenv("TOKEN_USAGE_BUDGET_USD", "10")
     warnings = []
     assert tu.budget_from_env(warnings) == 10.0 and warnings == []
+
+
+def test_a_wholly_undecodable_transcript_is_skipped_not_counted(tu, tmp_path, monkeypatch,
+                                                                capsys):
+    # errors="replace" (added so a few bad bytes cannot crash every reader)
+    # also turned a binary .jsonl into a summary with no usage — which the
+    # corpus scan then COUNTED as a session, with nothing on stderr and
+    # nothing in skipped_transcripts. "There is nothing here to read" is not
+    # "you spent nothing".
+    proj = seed_projects(tmp_path, monkeypatch)
+    binary = proj / "-Users-x-repo-one" / "binary.jsonl"
+    binary.write_bytes(b"\xff\xfe\x00\x01\x02\n\xff\xff\xfe\n")
+    data = tu.run_history(by="project")
+    by_key = {r["key"]: r for r in data["rows"]}
+    assert by_key["-Users-x-repo-one"]["calls"] == 1          # the phantom session is gone
+    assert data["skipped_transcripts"] == [str(binary)]
+    err = capsys.readouterr().err
+    assert "skipping unreadable transcript" in err and "binary.jsonl" in err
+    assert "1 transcript(s) skipped (unreadable)" in tu.render_history(data)
+
+
+def test_an_unreadable_projects_root_is_disclosed_like_a_missing_one(tu, tmp_path,
+                                                                     monkeypatch, capsys):
+    # is_dir() alone passes a directory that cannot be listed: Path.glob()
+    # swallows the PermissionError and the scan reported a clean, successful,
+    # empty corpus with "projects_dir_missing": null actively asserting that
+    # nothing had gone wrong.
+    import os as _os
+    if _os.geteuid() == 0:
+        import pytest as _pytest
+        _pytest.skip("root ignores directory permissions")
+    proj = seed_projects(tmp_path, monkeypatch)
+    proj.chmod(0o000)
+    try:
+        assert proj.is_dir()                                  # the old check said "fine"
+        hist = tu.run_history(by="project")
+        top = tu.run_top_consumers(since="30d")
+    finally:
+        proj.chmod(0o700)
+    assert hist["rows"] == [] and hist["projects_dir_missing"] == str(proj)
+    assert f"No readable Claude Code projects directory at {proj}" in tu.render_history(hist)
+    assert top["projects_dir_missing"] == str(proj)
+    assert "no readable Claude Code projects directory" in capsys.readouterr().err
+
+
+def test_since_rejects_a_day_count_that_overflows(tu):
+    import pytest
+    # timedelta(days=999999999999) raised OverflowError: a typo exited 1 with a
+    # raw traceback on the CLI, and through MCP became an isError whose whole
+    # text was "Python int too large to convert to C int".
+    for bad in ("36501d", "3652058d", "999999999999d"):
+        with pytest.raises(SystemExit) as e:
+            tu.since_cutoff(bad)
+        assert f"invalid --since value {bad!r}" in str(e.value), bad
+    assert tu.since_cutoff("36500d")                          # a century still resolves
+
+
+def test_huge_since_is_an_error_not_an_overflow_traceback(tmp_path):
+    import subprocess
+    import sys
+
+    from conftest import SCRIPT
+    env = {**os.environ, "TOKEN_USAGE_PROJECTS_DIR": str(tmp_path / "projects"),
+           "TOKEN_USAGE_LEDGER_DIR": str(tmp_path / "cache")}
+    r = subprocess.run([sys.executable, str(SCRIPT), "history", "--since", "999999999999d"],
+                       capture_output=True, text=True, env=env, check=False)
+    assert r.returncode == 1
+    assert "Traceback" not in r.stderr
+    assert "invalid --since value '999999999999d'" in r.stderr

@@ -406,7 +406,7 @@ def test_window_mode_empty_scan_says_nothing_was_scanned(tu, monkeypatch, tmp_pa
     # empty scan of a real projects dir and a mistyped one read identically.
     assert tu.render_insights(r) == (
         "No sessions in window — nothing was scanned.\n\n"
-        f"No Claude Code projects directory at {tmp_path / 'nope'} — nothing was scanned.")
+        f"No readable Claude Code projects directory at {tmp_path / 'nope'} — nothing was scanned.")
 
     monkeypatch.setenv("TOKEN_USAGE_PROJECTS_DIR", str(tmp_path / "projects"))
     _session(tmp_path, "s0", 2000)
