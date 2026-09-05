@@ -77,11 +77,21 @@ def _valid_rates(v):
             and ("cache_read" not in v or _is_rate(v["cache_read"])))
 
 
-def load_pricing():
+def warn(message, warnings=None):
+    """Report a non-fatal problem on stderr and, when a list is given, collect
+    it. MCP callers never see stderr, so anything that silently changes the
+    numbers has to be able to travel in the result too."""
+    print(f"token-usage: {message}", file=sys.stderr)
+    if warnings is not None:
+        warnings.append(message)
+
+
+def load_pricing(warnings=None):
     """Three-layer per-model-key merge: defaults <- bundled <- user overlay.
 
     A malformed layer (or a single invalid entry) is warned about once on
-    stderr and skipped — never fatal, because the Stop hook calls this."""
+    stderr and skipped — never fatal, because the Stop hook calls this. Pass a
+    list as `warnings` to collect the same messages (the MCP server does)."""
     pricing = dict(DEFAULT_PRICING)
     bundled = Path(__file__).resolve().parent.parent / "data" / "pricing.json"
     for layer in (bundled, user_pricing_path()):
@@ -90,17 +100,16 @@ def load_pricing():
         try:
             data = json.loads(layer.read_text())
         except (ValueError, OSError):
-            print(f"token-usage: ignoring malformed pricing file {layer}", file=sys.stderr)
+            warn(f"ignoring malformed pricing file {layer}", warnings)
             continue
         if not isinstance(data, dict):
-            print(f"token-usage: ignoring malformed pricing file {layer}", file=sys.stderr)
+            warn(f"ignoring malformed pricing file {layer}", warnings)
             continue
         for key, rates in data.items():
             if _valid_rates(rates):
                 pricing[key] = rates
             else:
-                print(f"token-usage: ignoring invalid rates for {key} in {layer}",
-                      file=sys.stderr)
+                warn(f"ignoring invalid rates for {key} in {layer}", warnings)
     return pricing
 
 
@@ -765,8 +774,8 @@ def iter_summaries(pricing, cutoff=None, project=None, exclude=None, progress=Fa
         yield s
 
 
-def run_history(by="project", since=None, project=None):
-    pricing = load_pricing()
+def run_history(by="project", since=None, project=None, warnings=None):
+    pricing = load_pricing(warnings)
     cutoff = since_cutoff(since)
     rows = {}
     unpriced, skipped = set(), []
@@ -876,10 +885,10 @@ def render_history(data):
     return "\n".join(lines)
 
 
-def run_top_consumers(by="session", since="30d", project=None, limit=10):
+def run_top_consumers(by="session", since="30d", project=None, limit=10, warnings=None):
     """Costliest sessions (by="session") or command labels aggregated across
     sessions (by="command") in a window. Unpriced rows sort last."""
-    pricing = load_pricing()
+    pricing = load_pricing(warnings)
     cutoff = since_cutoff(since)
     unpriced, skipped = set(), []
     sessions, commands = [], {}
@@ -1158,8 +1167,8 @@ def window_insights(summaries, cutoff, pricing, now=None):
     return out
 
 
-def run_insights(transcript=None, since=None, project=None, budget=None):
-    pricing = load_pricing()
+def run_insights(transcript=None, since=None, project=None, budget=None, warnings=None):
+    pricing = load_pricing(warnings)
     if since:
         cutoff = since_cutoff(since)
         skipped = []
@@ -1291,12 +1300,18 @@ def locate_transcript(arg=None, session_id=None, project_dir=None):
                                          project_dir=project_dir)[0]
 
 
-def budget_from_env():
+def budget_from_env(warnings=None):
     """Session budget from TOKEN_USAGE_BUDGET_USD, or None when unset/unparseable.
-    Shared by the CLI and the MCP server so both read the variable the same way."""
+    Shared by the CLI, the Stop hook and the MCP server so all three read the
+    variable the same way. Unset is silent; a value that isn't a number is a
+    typo worth reporting (see warn())."""
+    raw = os.environ.get("TOKEN_USAGE_BUDGET_USD")
+    if raw is None:
+        return None
     try:
-        return float(os.environ["TOKEN_USAGE_BUDGET_USD"])
-    except (KeyError, ValueError):
+        return float(raw)
+    except ValueError:
+        warn(f"ignoring TOKEN_USAGE_BUDGET_USD={raw!r} — not a number", warnings)
         return None
 
 
@@ -1352,11 +1367,7 @@ def run_hook():
                         prior_multiple = 1
             except (json.JSONDecodeError, OSError):
                 pass
-        limit = None
-        try:
-            limit = float(os.environ["TOKEN_USAGE_BUDGET_USD"])
-        except (KeyError, ValueError):
-            pass
+        limit = budget_from_env()
         cost = data["total"]["cost_usd"]
         multiple = int(cost // limit) if (limit and limit > 0 and cost is not None) else 0
         # Parallel SubagentStop hooks race the ledger read-modify-write, so

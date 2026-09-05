@@ -62,7 +62,7 @@ TOOLS = [
                     "session against the project's 30-day norms; pass since for window mode "
                     "(spend trend, top mover). Pure arithmetic, no LLM.",
      "inputSchema": _schema(dict(SESSION_SELECTORS, since=SINCE, project=PROJECT,
-                                 budget_usd={"type": "number",
+                                 budget_usd={"type": "number", "exclusiveMinimum": 0,
                                              "description": "Session budget for the budget-pace "
                                                             "rule (overrides TOKEN_USAGE_BUDGET_USD)."}))},
     {"name": "diff",
@@ -116,6 +116,8 @@ def validate_args(schema, args):
             problems.append(f"{key} must be one of {spec['enum']}")
         if "minimum" in spec and val < spec["minimum"]:
             problems.append(f"{key} must be >= {spec['minimum']}")
+        if "exclusiveMinimum" in spec and val <= spec["exclusiveMinimum"]:
+            problems.append(f"{key} must be > {spec['exclusiveMinimum']}")
     return problems
 
 
@@ -269,22 +271,25 @@ def guess_note(transcript, via):
             f"{transcript.parent.name}, which may not be the session you meant."]
 
 
-def finish(data, render, fmt, footnotes=()):
-    """JSON payload, or the rendered markdown with each footnote as its own block."""
+def finish(data, render, fmt, warnings, footnotes=()):
+    """JSON payload (always carrying "warnings"), or the rendered markdown with
+    each footnote — the warnings included — as its own block."""
+    data["warnings"] = warnings
     if fmt != "markdown":
         return json.dumps(data)
-    return "\n\n".join([render(data), *footnotes])
+    return "\n\n".join([render(data), *footnotes, *(f"Warning: {w}" for w in warnings)])
 
 
 def tool_session_cost(args):
+    warnings = []
     t, via = pick_transcript(args.get("transcript"), args.get("session_id"))
-    data = tu.aggregate(tu.parse_session(t), tu.load_pricing())
+    data = tu.aggregate(tu.parse_session(t), tu.load_pricing(warnings))
     data["transcript"] = data["transcript_path"] = str(t)
     data["resolved_via"] = via
     return finish(data,
                   lambda d: tu.render_report(d, show_agents=bool(args.get("agents")),
                                              show_models=bool(args.get("models"))),
-                  args.get("format"), guess_note(t, via))
+                  args.get("format"), warnings, guess_note(t, via))
 
 
 def _looks_like_path(value):
@@ -304,15 +309,17 @@ def _path_or_id(value):
 
 
 def tool_diff(args):
+    warnings = []
     old, new = _path_or_id(args["old"]), _path_or_id(args["new"])
-    data = tu.diff_data(old, new, tu.load_pricing())
-    return finish(data, tu.render_diff, args.get("format"))
+    data = tu.diff_data(old, new, tu.load_pricing(warnings))
+    return finish(data, tu.render_diff, args.get("format"), warnings)
 
 
 def tool_history(args):
+    warnings = []
     data = tu.run_history(by=args.get("by", "project"), since=args.get("since"),
-                          project=args.get("project"))
-    return finish(data, tu.render_history, args.get("format"))
+                          project=args.get("project"), warnings=warnings)
+    return finish(data, tu.render_history, args.get("format"), warnings)
 
 
 def tool_insights(args):
@@ -321,25 +328,29 @@ def tool_insights(args):
     has_session = args.get("transcript") is not None or args.get("session_id") is not None
     if has_session and args.get("since"):
         raise ToolError("pass a transcript/session_id OR since, not both")
+    warnings = []
     budget = args.get("budget_usd")
     if budget is None:
-        budget = tu.budget_from_env()
+        budget = tu.budget_from_env(warnings)
     footnotes = []
     if args.get("since"):
-        data = tu.run_insights(since=args["since"], project=args.get("project"), budget=budget)
+        data = tu.run_insights(since=args["since"], project=args.get("project"),
+                               budget=budget, warnings=warnings)
     else:
         t, via = pick_transcript(args.get("transcript"), args.get("session_id"))
-        data = tu.run_insights(transcript=str(t), budget=budget)
+        data = tu.run_insights(transcript=str(t), budget=budget, warnings=warnings)
         data["transcript"] = str(t)
         data["resolved_via"] = via
         footnotes = guess_note(t, via)
-    return finish(data, tu.render_insights, args.get("format"), footnotes)
+    return finish(data, tu.render_insights, args.get("format"), warnings, footnotes)
 
 
 def tool_top_consumers(args):
+    warnings = []
     data = tu.run_top_consumers(by=args.get("by", "session"), since=args.get("since", "30d"),
-                                project=args.get("project"), limit=args.get("limit", 10))
-    return finish(data, tu.render_top_consumers, args.get("format"))
+                                project=args.get("project"), limit=args.get("limit", 10),
+                                warnings=warnings)
+    return finish(data, tu.render_top_consumers, args.get("format"), warnings)
 
 
 HANDLERS.update({"session_cost": tool_session_cost, "diff": tool_diff,

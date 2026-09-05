@@ -138,3 +138,38 @@ def test_history_collects_unpriced(tu, monkeypatch, tmp_path):
     data = tu.run_history(by="project")
     assert data["unpriced_models"] == ["claude-mystery-9"]
     assert "unpriced" in tu.render_history(data)
+
+
+def test_load_pricing_collects_its_warnings(tu, tmp_path, monkeypatch, capsys):
+    # The overlay silently reverting to bundled rates is exactly the kind of
+    # thing an MCP caller cannot see on stderr — collect the same text.
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+    overlay = tu.user_pricing_path()
+    overlay.parent.mkdir(parents=True)
+    overlay.write_text("{not json")
+    warnings = []
+    tu.load_pricing(warnings)
+    assert warnings == [f"ignoring malformed pricing file {overlay}"]
+    assert "token-usage: ignoring malformed pricing file" in capsys.readouterr().err
+
+    overlay.write_text(json.dumps({"claude-x": {"input": "free", "output": 1.0}}))
+    warnings = []
+    tu.load_pricing(warnings)
+    assert warnings == [f"ignoring invalid rates for claude-x in {overlay}"]
+
+    overlay.write_text(json.dumps({"claude-x": {"input": 1.0, "output": 2.0}}))
+    warnings = []
+    assert tu.load_pricing(warnings)["claude-x"] == {"input": 1.0, "output": 2.0}
+    assert warnings == []
+
+
+def test_budget_from_env_warns_about_junk(tu, monkeypatch, capsys):
+    monkeypatch.delenv("TOKEN_USAGE_BUDGET_USD", raising=False)
+    warnings = []
+    assert tu.budget_from_env(warnings) is None and warnings == []   # unset is silent
+    monkeypatch.setenv("TOKEN_USAGE_BUDGET_USD", "ten pounds")
+    assert tu.budget_from_env(warnings) is None
+    assert warnings == ["ignoring TOKEN_USAGE_BUDGET_USD='ten pounds' — not a number"]
+    assert "not a number" in capsys.readouterr().err
+    monkeypatch.setenv("TOKEN_USAGE_BUDGET_USD", "12.5")
+    assert tu.budget_from_env() == 12.5

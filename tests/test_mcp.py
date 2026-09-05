@@ -309,6 +309,7 @@ def test_diff_reports_a_mistyped_path_as_a_path(mcp, tmp_path, monkeypatch):
 def test_history_json_matches_cli_and_markdown_renders(mcp, tu, tmp_path, monkeypatch):
     seed(tmp_path, monkeypatch)
     data = json.loads(call(mcp, "history", by="command", since="2026-01-01")[0])
+    assert data.pop("warnings") == []          # MCP-only key, like transcript
     assert data == tu.run_history(by="command", since="2026-01-01")
     md, err = call(mcp, "history", by="project", format="markdown")
     assert not err and md.startswith("| Project | Calls |")
@@ -549,3 +550,63 @@ def test_nothing_found_names_projects_dir_project_dir_and_session_id(mcp, tmp_pa
     text, err = call(mcp, "session_cost")
     assert err
     assert str(proj) in text and "/Users/x/no-sessions-yet" in text and "session_id" in text
+
+
+def write_overlay(monkeypatch, tmp_path, text):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+    overlay = TOKEN_USAGE.user_pricing_path()
+    overlay.parent.mkdir(parents=True, exist_ok=True)
+    overlay.write_text(text)
+    return overlay
+
+
+def test_pricing_overlay_problems_reach_the_caller(mcp, tmp_path, monkeypatch):
+    # A malformed overlay reverts costs to bundled rates. On the CLI that is a
+    # stderr line; over MCP stderr is invisible, so it has to be in the result.
+    proj, s1, s2 = seed(tmp_path, monkeypatch)
+    overlay = write_overlay(monkeypatch, tmp_path, "{not json")
+    data = json.loads(call(mcp, "session_cost", transcript=str(s1))[0])
+    assert data["warnings"] == [f"ignoring malformed pricing file {overlay}"]
+    md, err = call(mcp, "session_cost", transcript=str(s1), format="markdown")
+    assert not err and f"Warning: ignoring malformed pricing file {overlay}" in md
+
+
+def test_every_tool_carries_a_warnings_key(mcp, tmp_path, monkeypatch):
+    proj, s1, s2 = seed(tmp_path, monkeypatch)
+    overlay = write_overlay(monkeypatch, tmp_path, "{not json")
+    expected = [f"ignoring malformed pricing file {overlay}"]
+    for name, args in (("session_cost", {"transcript": str(s1)}),
+                       ("history", {"since": "2026-01-01"}),
+                       ("insights", {"session_id": "bbb-222"}),
+                       ("insights", {"since": "2026-01-01"}),
+                       ("diff", {"old": "aaa-111", "new": "bbb-222"}),
+                       ("top_consumers", {"since": "2026-01-01"})):
+        text, err = call(mcp, name, **args)
+        assert not err, (name, text)
+        assert json.loads(text)["warnings"] == expected, name
+
+
+def test_clean_overlay_means_no_warnings(mcp, tmp_path, monkeypatch):
+    proj, s1, s2 = seed(tmp_path, monkeypatch)
+    write_overlay(monkeypatch, tmp_path, json.dumps({"claude-x": {"input": 1.0, "output": 2.0}}))
+    assert json.loads(call(mcp, "session_cost", transcript=str(s1))[0])["warnings"] == []
+    md, _ = call(mcp, "session_cost", transcript=str(s1), format="markdown")
+    assert "Warning:" not in md
+
+
+def test_junk_budget_env_is_reported_as_a_warning(mcp, tmp_path, monkeypatch):
+    proj, s1, s2 = seed(tmp_path, monkeypatch)
+    monkeypatch.setenv("TOKEN_USAGE_BUDGET_USD", "ten pounds")
+    data = json.loads(call(mcp, "insights", session_id="bbb-222")[0])
+    assert data["warnings"] == ["ignoring TOKEN_USAGE_BUDGET_USD='ten pounds' — not a number"]
+
+
+def test_budget_usd_must_be_positive(mcp, tmp_path, monkeypatch):
+    seed(tmp_path, monkeypatch)
+    assert mcp.SCHEMAS["insights"]["properties"]["budget_usd"]["exclusiveMinimum"] == 0
+    text, err = call(mcp, "insights", session_id="bbb-222", budget_usd=0)
+    assert err and "budget_usd must be > 0" in text
+    schema = {"type": "object", "additionalProperties": False,
+              "properties": {"n": {"type": "number", "exclusiveMinimum": 0}}}
+    assert mcp.validate_args(schema, {"n": 0.0}) == ["n must be > 0"]
+    assert mcp.validate_args(schema, {"n": 0.1}) == []
