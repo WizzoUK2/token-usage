@@ -21,7 +21,8 @@ SUPPORTED_VERSIONS = ("2024-11-05", "2025-03-26", "2025-06-18")
 LATEST_VERSION = "2025-06-18"
 
 FORMAT = {"type": "string", "enum": ["json", "markdown"],
-          "description": "json (default): structured data, same shapes as the CLI's json output. "
+          "description": "json (default): structured data — the CLI's json shapes plus "
+                         "transcript, resolved_via and warnings. "
                          "markdown: the rendered table/text."}
 SESSION_SELECTORS = {
     "transcript": {"type": "string", "description": "Path to a session .jsonl transcript."},
@@ -44,8 +45,9 @@ TOOLS = [
     {"name": "session_cost",
      "description": "Per-activity token usage and estimated API cost for one Claude Code / "
                     "Cowork session: which slash commands, skills and subagents consumed what. "
-                    "Defaults to the current project's newest session. Result names the "
-                    "transcript analysed.",
+                    "Defaults to the newest session for TOKEN_USAGE_PROJECT_DIR (Claude Code) "
+                    "or, without one, the newest session found on the machine. Result names "
+                    "the transcript analysed.",
      "inputSchema": _schema(dict(SESSION_SELECTORS,
                                  agents={"type": "boolean",
                                          "description": "Markdown: add per-agent-type rows."},

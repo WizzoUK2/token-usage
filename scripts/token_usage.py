@@ -8,15 +8,18 @@ slash-command invocations — or Skill tool_use blocks in Cowork (the Claude
 desktop app) — where each owns all turns until the next, rolls subagent
 transcripts up into the segment that spawned them, and prices the result against
 a bundled pricing table. Transcript discovery falls back to the Cowork sandbox
-mount when no Claude Code project directory matches the cwd.
+mount when no Claude Code project directory matches the cwd, and then to the
+newest transcript under any project on the machine — but only when no project
+directory was named: an explicit one never falls through to another project.
 
 Subcommands:
     report [TRANSCRIPT]   Markdown breakdown table (default: latest session in cwd project)
     json   [TRANSCRIPT]   Same data as JSON
     hook                  Read Claude Code hook JSON on stdin, update the session ledger
-    history               Cross-session rollup by project/day/command/model (--by, --since)
-    insights              Rule-based findings for one session or a window (--since)
-    top_consumers         Costliest sessions or commands in a window (--by, --since, --limit)
+    history               Cross-session rollup by project/day/command/model
+    insights              Rule-based findings for one session or a window
+    top_consumers         Costliest sessions or commands in a window
+(run with --help for each subcommand's flags)
 
 Stdlib only. Python 3.9+.
 """
@@ -1188,14 +1191,22 @@ def run_insights(transcript=None, since=None, project=None, budget=None, warning
 
 
 def render_insights(result):
-    if not result["findings"]:
-        note = skipped_footnote(result.get("skipped_transcripts") or [])
-        return "No notable findings." + (f"\n\n{note}" if note else "")
-    lines = [f"- [{f['severity']}] {f['message']}" for f in result["findings"]]
+    """Findings as `- [severity] message` lines, or "No notable findings.".
+
+    Session mode names the session in either branch — "nothing to report" is
+    exactly when the reader has no other clue which session was measured, and
+    discovery may well have guessed it."""
     transcript_path = result.get("transcript_path")
+    session = ""
     if transcript_path:
         tp = Path(transcript_path)
-        lines.append(f"(session: {tp.parent.name}/{tp.name})")
+        session = f"(session: {tp.parent.name}/{tp.name})"
+    if result["findings"]:
+        lines = [f"- [{f['severity']}] {f['message']}" for f in result["findings"]]
+        if session:
+            lines.append(session)
+    else:
+        lines = [("No notable findings. " + session).strip()]
     note = skipped_footnote(result.get("skipped_transcripts") or [])
     if note:
         lines += ["", note]

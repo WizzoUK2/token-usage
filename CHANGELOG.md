@@ -15,12 +15,30 @@ adheres to [Semantic Versioning](https://semver.org/).
   desktop can register the same script). Tools: `session_cost`, `history`,
   `insights`, `diff`, `top_consumers`; `format: json|markdown`; tool failures
   are `isError` results, protocol problems are JSON-RPC errors; nothing but
-  JSON-RPC reaches stdout. Current session resolves from
-  `TOKEN_USAGE_PROJECT_DIR` (`${CLAUDE_PROJECT_DIR}`), then the Cowork mount,
-  then the newest transcript anywhere.
+  JSON-RPC reaches stdout. "Current session" resolves in order: explicit
+  `transcript` → `session_id` → `TOKEN_USAGE_TRANSCRIPT` → the newest session
+  for `TOKEN_USAGE_PROJECT_DIR` (or `CLAUDE_PROJECT_DIR`), which fails closed
+  rather than falling through to another project → and only when no project
+  dir is set: the cwd's own project, the Cowork mount, then the newest
+  transcript anywhere.
+- **MCP results disclose how they were produced.** `session_cost` and
+  `insights` carry `resolved_via` (`explicit`, `session_id`, `env`,
+  `project_dir`, `cwd`, `cowork`, `any_project`) in JSON, and their markdown
+  adds a note when the session was merely the newest one found (`cwd` /
+  `any_project`). Every tool result carries a `warnings` list in JSON and a
+  `Warning: <text>` footnote per warning in markdown, so pricing-overlay
+  problems and a non-numeric `TOKEN_USAGE_BUDGET_USD` — stderr lines on the
+  CLI, invisible over MCP — reach the caller. `TOKEN_USAGE_PROJECT_DIR` that
+  is blank or still holds an unexpanded `${CLAUDE_PROJECT_DIR}` (Claude Code
+  before 2.1.139, or another host) counts as unset and falls back to
+  discovery instead of erroring on every call.
 - **`top_consumers` subcommand** — costliest sessions (`--by session`) or
   command labels aggregated across sessions (`--by command`) in a window;
-  `--since`, `--project`, `--limit`, `--json`. Unpriced rows sort last.
+  `--since`, `--project`, `--limit`, `--json`. Unpriced rows sort last and are
+  disclosed: session mode reports `unpriced_rows` for the window (with a
+  footnote when `--limit` cut any of them), and command mode marks a label
+  `"partial": true` when some of its sessions ran on unpriced models, so a
+  priced subtotal is never mistaken for the whole cost.
 - **Session-id lookup** — `locate_transcript()` resolves a Claude Code session
   id across every project; `resolve_transcript()` now fails cleanly on a
   non-existent explicit path (`transcript not found: <path>`) instead of
@@ -48,20 +66,37 @@ adheres to [Semantic Versioning](https://semver.org/).
   anchor on, but it also means running these commands from a directory with
   no Claude Code history of its own can silently analyse a different
   project's most recent session instead of failing — pass an explicit
-  transcript path or session id when that matters.
+  transcript path or session id when that matters. MCP callers only reach
+  this fallback when no project dir is set; with one, a project that has no
+  sessions yet is an error.
 - **`report` and `insights` now name the transcript they measured.** The
-  markdown `report` ends with a `Session: <project-slug>/<session>.jsonl`
-  line, `insights` text output appends `(session: <project-slug>/<session>.jsonl)`,
-  and `insights --json` gains `transcript_path` in session mode. Auto-discovery
-  can land on a session in a different project (see the fallback change
-  above), so which one was analysed is no longer left implicit. Scripts
-  parsing the text output should expect the extra trailing line.
+  markdown `report` gains a `Session: <project-slug>/<session>.jsonl` line
+  directly below the table (the cache-savings, unpriced and `Models:` lines
+  still follow it), `insights` text output gains an extra
+  `(session: <project-slug>/<session>.jsonl)` — appended as its own line when
+  rules fired, and on the same line as `No notable findings.` when none did —
+  and `insights --json` gains `transcript_path` in session mode.
+  Auto-discovery can land on a session in a different project (see the
+  fallback change above), so which one was analysed is no longer left
+  implicit. Scripts parsing the text output should expect the extra line.
 - **Sonnet 5 priced at $2/$10** (was $3/$15). Anthropic made the launch
   price permanent in September 2026 instead of raising it, so the "promo not
   modelled" caveat is gone. Sonnet 5 session costs drop by a third vs 0.5.0.
 
 ### Fixed
 
+- **A corpus scan no longer reports "no usage" as a success.** An unwritable
+  cache directory (`TOKEN_USAGE_LEDGER_DIR` / `~/.cache/token-usage/index`)
+  made `history`, `top_consumers`, window `insights` and the `insights`
+  baseline skip every transcript and print an empty table; a single
+  unreadable transcript disappeared the same way. Cache-write failures now
+  warn once per process and the freshly parsed summary is used anyway, and an
+  unreadable transcript is warned about on stderr, listed as
+  `skipped_transcripts` in the JSON (a count in the `insights` baseline) and
+  footnoted in the markdown.
+- **A broken `TOKEN_USAGE_TRANSCRIPT` is diagnosed by name.** Both the CLI and
+  the MCP server used to answer "no transcript found"; they now say
+  `TOKEN_USAGE_TRANSCRIPT is set to <path> but that file does not exist`.
 - **History index no longer serves stale costs after a pricing change.**
   Cached per-transcript summaries bake `cost_usd` in but were re-validated
   only by (mtime, size), so `history --by project|day|command` and the

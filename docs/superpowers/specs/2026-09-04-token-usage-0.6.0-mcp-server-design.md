@@ -192,8 +192,12 @@ Used by `session_cost`, `insights` (session mode) and `diff`. Order:
    5 — reporting a *different* project's session with no indication would
    be worse than a clean "not found";
 5. no `project_dir` at all (no project context to anchor on — Claude
-   desktop, or a bare CLI invocation): the Cowork mount roots (they hold
+   desktop, or a bare CLI invocation): the cwd's own project directory
+   (`<projects>/<slug(cwd)>/`), then the Cowork mount roots (they hold
    exactly the live session), then the newest `.jsonl` under any project.
+
+`diff` takes a path or a session id per side, so it only ever uses steps 1–2;
+there is no "current session" default to fall through to.
 
 The analyser gains `locate_transcript(arg=None, session_id=None,
 project_dir=None)` returning a `Path` or `None`; the CLI's

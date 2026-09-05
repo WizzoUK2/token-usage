@@ -146,26 +146,31 @@ no install). When the plugin is enabled, Claude Code starts it and the tools app
 
 | Tool | What it answers |
 |---|---|
-| `session_cost` | Per-activity breakdown of one session (`transcript` or `session_id`; defaults to the current project's newest session). Result names the transcript analysed. |
+| `session_cost` | Per-activity breakdown of one session (`transcript` or `session_id`; defaults to the current project's newest session). The result's `transcript` key names the transcript analysed, and `resolved_via` names the rung that found it. |
 | `history` | Cross-session rollup `by` project / day / command / model, with `since` and `project` filters. |
 | `insights` | Rule-based findings: session mode (one session vs the project's 30-day norms) or window mode (`since`). Optional `budget_usd`. |
 | `diff` | Per-activity cost and output deltas between two sessions (paths or session ids). |
 | `top_consumers` | Costliest sessions or command labels in a window (`by`, `since`, `project`, `limit`). |
 
-Every tool takes `format`: `json` (default, same shapes as the CLI's JSON output) or
-`markdown` (the rendered table). Failures come back as tool results with `isError`, never
-as protocol errors, so a missing transcript or a bad `since` is a readable message.
+Every tool takes `format`: `json` (default — the CLI's JSON shapes plus `transcript`,
+`resolved_via` and `warnings`) or `markdown` (the rendered table, with the same warnings
+as `Warning:` footnotes). Failures come back as tool results with `isError`, never as
+protocol errors, so a missing transcript or a bad `since` is a readable message.
 
 **"Current session"** resolves in this order: explicit `transcript` path → `session_id`
 (searched across every project) → `TOKEN_USAGE_TRANSCRIPT` → auto-discovery. What
 auto-discovery does depends on whether there is a project dir to anchor on:
 
-- **With `TOKEN_USAGE_PROJECT_DIR`** — which Claude Code always supplies, since the
-  plugin's `.mcp.json` passes `${CLAUDE_PROJECT_DIR}` — it is the newest transcript for
-  *that project only*. There is no fall-through: a project with no sessions yet is an
-  error, never a guess at some other project's session.
+- **With `TOKEN_USAGE_PROJECT_DIR`** — the plugin's `.mcp.json` passes
+  `${CLAUDE_PROJECT_DIR}`, which reaches stdio MCP servers from Claude Code 2.1.139;
+  older builds (and other hosts) leave it unexpanded or empty, which the server treats as
+  unset and falls back to discovery. When it *is* set, the session is the newest
+  transcript for *that project only*. There is no fall-through: a project with no
+  sessions yet is an error, never a guess at some other project's session.
 - **Without one** (Claude desktop, or the script run by hand): newest transcript for the
-  cwd's own project → the Cowork mount → newest transcript on the machine.
+  cwd's own project → the Cowork mount → newest transcript on the machine. In those last
+  two cases nobody named the session, so `resolved_via` says `cwd` / `any_project` and
+  the markdown carries a note saying which project it landed on.
 
 **Claude desktop / Cowork.** Add to `claude_desktop_config.json`:
 
@@ -186,8 +191,15 @@ or, for a Claude Code user scope outside the plugin:
 claude mcp add --scope user token-usage -- python3 /absolute/path/to/token-usage/scripts/mcp_server.py
 ```
 
+That route starts the server without `TOKEN_USAGE_PROJECT_DIR`, but Claude Code exports
+`CLAUDE_PROJECT_DIR` to stdio servers (2.1.139+) and the server reads it as a fallback, so
+"current session" still anchors on the project you are in. User-scope tools are named
+`mcp__token-usage__<tool>` rather than the plugin's
+`mcp__plugin_token-usage_token-usage__<tool>`.
+
 The server reads `~/.claude/projects` on the host, so a desktop session sees the same
-history the CLI does. No caching in-process: pricing overlay edits apply on the next call.
+history the CLI does. No caching in-process: pricing overlay edits apply on the next call
+(and a malformed overlay comes back in the result's `warnings`).
 
 ## Insights
 

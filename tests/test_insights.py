@@ -230,6 +230,19 @@ def test_render_insights_empty_and_lines(tu):
     assert tu.render_insights(r) == "- [warn] watch out\n- [info] fyi"
 
 
+def test_render_insights_names_the_session_in_both_branches(tu):
+    # Which session was measured matters most when discovery guessed it, and
+    # "nothing to report" is exactly when the reader has no other clue.
+    path = "/home/u/.claude/projects/-Users-x-alpha/aaa-111.jsonl"
+    assert tu.render_insights({"findings": [], "transcript_path": path}) == \
+        "No notable findings. (session: -Users-x-alpha/aaa-111.jsonl)"
+    r = {"findings": [tu.finding("x", "warn", "watch out")], "transcript_path": path}
+    assert tu.render_insights(r) == \
+        "- [warn] watch out\n(session: -Users-x-alpha/aaa-111.jsonl)"
+    # Window mode has no session to name, so the bare sentence stands.
+    assert tu.render_insights({"findings": [], "mode": "window"}) == "No notable findings."
+
+
 def test_run_insights_session_mode(tu, monkeypatch, tmp_path):
     monkeypatch.setenv("TOKEN_USAGE_PROJECTS_DIR", str(tmp_path / "projects"))
     monkeypatch.setenv("TOKEN_USAGE_LEDGER_DIR", str(tmp_path / "cache"))

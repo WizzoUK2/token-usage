@@ -327,7 +327,10 @@ def test_insights_session_mode_names_transcript(mcp, tmp_path, monkeypatch):
     assert data["mode"] == "session" and data["transcript"] == str(s2)
     assert isinstance(data["findings"], list)
     md, err = call(mcp, "insights", session_id="bbb-222", format="markdown")
-    assert not err and (md == "No notable findings." or md.startswith("- ["))
+    assert not err
+    # Whatever the rules find (or don't), the markdown names the session.
+    assert f"(session: {s2.parent.name}/{s2.name})" in md
+    assert md.startswith("No notable findings.") or md.startswith("- [")
 
 
 def test_insights_window_mode(mcp, tmp_path, monkeypatch):
