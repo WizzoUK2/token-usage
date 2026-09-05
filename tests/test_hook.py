@@ -240,5 +240,49 @@ def test_hook_reports_a_failed_ledger_write(tmp_path):
     finally:
         ro.chmod(0o700)
     assert r.returncode == 0                                     # never break the session
-    assert r.stdout.strip() == ""                                # stdout stays hook protocol
     assert "hook: ledger update failed" in r.stderr
+    # ...and the nudge itself still goes out: it was computed before the write
+    # failed, and losing the headline feature to a broken cache dir is exactly
+    # the silence this test exists to prevent. stdout stays hook protocol.
+    assert json.loads(r.stdout)["systemMessage"].startswith(
+        "token-usage: session estimate $50.00 has passed")
+
+
+def test_hook_never_fails_on_undecodable_stdin(tmp_path):
+    # json.load(sys.stdin) DECODES before it parses, so a non-UTF-8 byte raises
+    # UnicodeDecodeError — a ValueError, but not a JSONDecodeError — and walks
+    # straight past the guard: rc=1 plus a traceback on every Stop, which is
+    # the one thing a hook must never do. PYTHONIOENCODING pins strict UTF-8
+    # decoding, the ordinary desktop locale (a POSIX locale hides this behind
+    # PEP 538 coercion to surrogateescape).
+    env = {**os.environ, "TOKEN_USAGE_LEDGER_DIR": str(tmp_path / "ledger"),
+           "PYTHONIOENCODING": "utf-8"}
+    env.pop("TOKEN_USAGE_BUDGET_USD", None)
+    for raw in (b'\xff\xfe{"a": 1}', b"\xff", b"\x80\x81\x82",
+                b'{"session_id": "s", "transcript_path": "\xff\xfe"}'):
+        r = subprocess.run([sys.executable, str(SCRIPT), "hook"], input=raw,
+                           capture_output=True, env=env, check=False)
+        assert r.returncode == 0, (raw, r.stderr)
+        assert r.stdout == b"" and r.stderr == b"", raw
+
+
+def test_hook_survives_an_ascii_stdio_encoding(tmp_path):
+    # launchd/cron/containers hand the hook a POSIX locale: stdin then decodes
+    # as ASCII, and a well-formed payload naming a path with one non-ASCII
+    # character died in the decode. Hook payloads are JSON — UTF-8 by spec —
+    # so the bytes must be decoded as UTF-8 whatever the locale says, and the
+    # nudge must come back out as ASCII-safe JSON.
+    t = write_jsonl(tmp_path / "café" / "t.jsonl", [
+        user("2026-06-12T10:00:00Z", command="/big"),
+        assistant("2026-06-12T10:00:01Z", usage(out=1_000_000), request_id="r1"),
+    ])
+    payload = json.dumps({"session_id": "loc-1", "transcript_path": str(t)},
+                         ensure_ascii=False).encode()
+    env = {**os.environ, "TOKEN_USAGE_LEDGER_DIR": str(tmp_path / "ledger"),
+           "PYTHONIOENCODING": "ascii", "TOKEN_USAGE_BUDGET_USD": "10"}
+    r = subprocess.run([sys.executable, str(SCRIPT), "hook"], input=payload,
+                       capture_output=True, env=env, check=False)
+    assert r.returncode == 0, r.stderr
+    assert "budget" in json.loads(r.stdout.decode())["systemMessage"]
+    ledger = json.loads((tmp_path / "ledger" / "loc-1.json").read_text())
+    assert ledger["total"]["cost_usd"] == 50.0

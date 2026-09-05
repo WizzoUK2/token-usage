@@ -1,3 +1,5 @@
+import json
+
 from conftest import assistant, usage, user, write_jsonl
 
 
@@ -185,3 +187,37 @@ def test_no_command_only_before_first_command(tu, tmp_path):
     assert data["by_label"][tu.OTHER_LABEL]["usage"]["output"] == 10
     assert data["by_label"][tu.OTHER_LABEL]["invocations"] == 1      # ONE sticky segment
     assert data["by_label"]["/commit"]["usage"]["output"] == 10
+
+
+def test_undecodable_transcript_bytes_are_replaced_not_fatal(tu, tmp_path):
+    # A transcript with a few undecodable bytes must still parse: open() ran
+    # with strict UTF-8, so one stray byte turned every reader (report, json,
+    # insights, the hook, the corpus scan) into a UnicodeDecodeError traceback.
+    p = tmp_path / "t.jsonl"
+    p.write_bytes(
+        json.dumps(user("2026-06-12T10:00:00Z", command="/build")).encode() + b"\n"
+        + json.dumps(assistant("2026-06-12T10:00:01Z", usage(out=100), request_id="r1")).encode() + b"\n"
+        + b'{"type": "user", "message": {"role": "user", "content": "caf\xe9"}}\n'
+        + b"\xff\xfe\x00\n"
+        + json.dumps(assistant("2026-06-12T10:00:02Z", usage(out=50), request_id="r2")).encode()
+        + b"\n")
+    by_model, _ts = tu.sum_transcript(p)
+    assert by_model["claude-fable-5"]["output"] == 150
+    segs = tu.parse_session(p)
+    assert sum(s["by_model"]["claude-fable-5"]["output"] for s in segs) == 150
+
+
+def test_cli_report_survives_an_undecodable_transcript(tmp_path):
+    import os
+    import subprocess
+    import sys
+
+    from conftest import SCRIPT
+    p = tmp_path / "t.jsonl"
+    p.write_bytes(b"\xff\xfe\x00\n" + json.dumps(
+        assistant("2026-06-12T10:00:01Z", usage(out=100), request_id="r1")).encode() + b"\n")
+    r = subprocess.run([sys.executable, str(SCRIPT), "report", str(p)],
+                       capture_output=True, text=True, check=False,
+                       env={**os.environ, "TOKEN_USAGE_LEDGER_DIR": str(tmp_path / "c")})
+    assert r.returncode == 0, r.stderr
+    assert "Total" in r.stdout

@@ -9,6 +9,7 @@ Framing: one JSON-RPC object per line on stdin/stdout. stdout carries
 JSON-RPC only; diagnostics go to stderr.
 """
 
+import io
 import json
 import os
 import sys
@@ -173,7 +174,8 @@ def plugin_version():
     stop the handshake, but it must not pass unmentioned either."""
     manifest = plugin_manifest_path()
     try:
-        return str(json.loads(manifest.read_text()).get("version", "0"))
+        return str(json.loads(manifest.read_text(encoding="utf-8",
+                                                 errors="replace")).get("version", "0"))
     except (OSError, ValueError, AttributeError) as e:  # missing, malformed, or not an object
         print(f"token-usage: cannot read plugin manifest {manifest}: {e}", file=sys.stderr)
         return "0"
@@ -220,9 +222,28 @@ def handle_message(msg):
     return _error(id_, -32601, f"method not found: {method}")
 
 
+def _resilient_stdin():
+    """sys.stdin, decoding undecodable bytes instead of raising.
+
+    The decode happens in the TextIOWrapper, OUTSIDE every handler: one 0xff
+    byte on stdin used to kill the process with rc=1 and no replies at all —
+    losing valid requests already queued ahead of it. Whatever the locale
+    says, this is a JSON-RPC stream, so it is UTF-8 with errors="replace" and
+    a bad line becomes an ordinary -32700 parse error."""
+    try:
+        return io.TextIOWrapper(sys.stdin.buffer, encoding="utf-8",
+                                errors="replace", newline="")
+    except (AttributeError, ValueError, OSError):
+        try:
+            sys.stdin.reconfigure(errors="replace")
+        except (AttributeError, ValueError, OSError):
+            pass
+        return sys.stdin
+
+
 def serve(stdin=None, stdout=None):
-    stdin = stdin or sys.stdin
-    stdout = stdout or sys.stdout
+    stdin = stdin if stdin is not None else _resilient_stdin()
+    stdout = stdout if stdout is not None else sys.stdout
     for line in stdin:
         line = line.strip()
         if not line:

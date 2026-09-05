@@ -751,3 +751,22 @@ def test_session_cost_agents_flag_is_passed_through(mcp, tmp_path, monkeypatch):
     assert not err and "↳ Explore" in md
     plain, err = call(mcp, "session_cost", transcript=str(t), format="markdown")
     assert not err and "↳ Explore" not in plain
+
+
+def test_server_survives_undecodable_stdin_bytes(tmp_path, monkeypatch):
+    # The decode happens in the TextIOWrapper, outside every handler: one 0xff
+    # byte used to kill the process with rc=1 and ZERO replies — losing the
+    # already-valid request queued ahead of it.
+    proj, _s1, _s2 = seed(tmp_path, monkeypatch)
+    env = dict(os.environ, TOKEN_USAGE_PROJECTS_DIR=str(proj),
+               TOKEN_USAGE_LEDGER_DIR=str(tmp_path / "cache"),
+               PYTHONIOENCODING="utf-8")   # strict UTF-8: the desktop locale
+    script = (json.dumps(req("ping", id_=1)).encode() + b"\n"
+              + b"\xff\xfe{\"jsonrpc\": \"2.0\"}\n"
+              + json.dumps(req("ping", id_=2)).encode() + b"\n")
+    r = subprocess.run([sys.executable, str(SERVER)], input=script, capture_output=True,
+                       env=env, timeout=30, check=False)
+    assert r.returncode == 0, r.stderr
+    replies = [json.loads(line) for line in r.stdout.decode().splitlines()]
+    assert [m.get("id") for m in replies if "result" in m] == [1, 2]
+    assert [m["error"]["code"] for m in replies if "error" in m] == [-32700]

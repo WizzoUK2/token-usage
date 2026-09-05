@@ -26,6 +26,7 @@ Stdlib only. Python 3.9+.
 
 import argparse
 import json
+import math
 import os
 import re
 import sys
@@ -101,7 +102,7 @@ def load_pricing(warnings=None):
         if not layer.exists():
             continue
         try:
-            data = json.loads(layer.read_text())
+            data = json.loads(layer.read_text(encoding="utf-8", errors="replace"))
         except (ValueError, OSError):
             warn(f"ignoring malformed pricing file {layer}", warnings)
             continue
@@ -265,7 +266,11 @@ def is_user_prompt(entry):
 
 
 def iter_jsonl(path):
-    with open(path, encoding="utf-8") as fh:
+    # errors="replace": a transcript with a few undecodable bytes must still
+    # parse (the affected line simply fails json.loads and is skipped) rather
+    # than turning every reader — report, the hook, the corpus scan — into a
+    # UnicodeDecodeError traceback.
+    with open(path, encoding="utf-8", errors="replace") as fh:
         for line in fh:
             line = line.strip()
             if not line:
@@ -413,8 +418,9 @@ def parse_session(transcript_path):
             meta_path = agent_file.parent / (agent_file.stem + ".meta.json")
             if meta_path.exists():
                 try:
-                    meta = json.loads(meta_path.read_text())
-                except (json.JSONDecodeError, OSError):
+                    meta = json.loads(meta_path.read_text(encoding="utf-8",
+                                                          errors="replace"))
+                except (ValueError, OSError):   # ValueError: malformed JSON
                     pass
             idx = None
             if a_ts:
@@ -680,14 +686,14 @@ def cached_summary(path, pricing):
     st = path.stat()
     if cache_file.exists():
         try:
-            c = json.loads(cache_file.read_text())
+            c = json.loads(cache_file.read_text(encoding="utf-8", errors="replace"))
             # Valid JSON that isn't an object would blow up on .get() — a
             # corrupt entry must re-parse, never crash the whole scan.
             if (isinstance(c, dict) and c.get("version") == INDEX_VERSION
                     and c.get("mtime_ns") == st.st_mtime_ns and c.get("size") == st.st_size
                     and c.get("pricing") == pricing_fingerprint(pricing)):
                 return c, True
-        except (json.JSONDecodeError, OSError):
+        except (ValueError, OSError):
             pass
     s = summarize_transcript(path, pricing, st)
     # An unwritable cache directory costs speed, not correctness: warn once
@@ -695,7 +701,7 @@ def cached_summary(path, pricing):
     try:
         cache_file.parent.mkdir(parents=True, exist_ok=True)
         tmp = cache_file.with_suffix(".tmp")
-        tmp.write_text(json.dumps(s))
+        tmp.write_text(json.dumps(s), encoding="utf-8")
         tmp.replace(cache_file)
     except OSError as e:
         if not _CACHE_WRITE_WARNED:
@@ -1430,20 +1436,92 @@ def resolve_transcript(arg):
     sys.exit("token-usage: no transcript found — pass a path to a session .jsonl file")
 
 
-def run_hook():
+def _hook_payload():
+    """The hook payload as a dict, or None when stdin does not hold one.
+
+    Read as BYTES and decoded here rather than by sys.stdin's locale-dependent
+    wrapper. Hook payloads are JSON, i.e. UTF-8 by definition, so a
+    POSIX-locale launchd/cron/container run must still understand an accented
+    transcript path; and an undecodable byte raises UnicodeDecodeError — a
+    ValueError, but NOT a json.JSONDecodeError — which used to escape the
+    guard here exactly the way AttributeError/TypeError did.
+
+    Well-formed JSON that isn't a hook payload gets no further either: `null`,
+    a list or a bare string all parse, and .get() on them raised outside the
+    guarded body below."""
     try:
-        payload = json.load(sys.stdin)
-    except json.JSONDecodeError:
-        return 0  # never block Claude Code on a malformed hook payload
-    # Well-formed JSON that isn't a hook payload gets no further: `null`, a
-    # list or a bare string all parse, and .get() on them raised *outside* the
-    # broad try below -- exit 1 and a traceback, which is the one thing a hook
-    # must never do. Same for a non-string transcript_path, which Path() would
-    # reject with a TypeError.
-    if not isinstance(payload, dict):
+        raw = sys.stdin.buffer.read()
+    except (AttributeError, ValueError, OSError):
+        # No binary stdin (a StringIO stand-in) or an unreadable one.
+        try:
+            raw = sys.stdin.read().encode("utf-8", "replace")
+        except (ValueError, OSError):
+            return None
+    try:
+        payload = json.loads(raw.decode("utf-8", "replace"))
+    except ValueError:  # malformed JSON — never block Claude Code on it
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _hook_warn(message):
+    """warn() that cannot itself raise — stderr may be an ASCII stream, and a
+    diagnostic must never become the traceback it was reporting."""
+    try:
+        warn(message)
+    except Exception:  # noqa: BLE001, S110 — nothing left to report it with
+        pass
+
+
+def _prior_budget_multiple(ledger):
+    """How many budget multiples this session has already been nudged about."""
+    if not ledger.exists():
+        return 0
+    try:
+        prior = json.loads(ledger.read_text(encoding="utf-8", errors="replace"))
+    except (ValueError, OSError):
+        return 0
+    if not isinstance(prior, dict):
+        return 0
+    pm = prior.get("budget_notified_multiple")
+    if isinstance(pm, (int, float)) and not isinstance(pm, bool):
+        return int(pm) if math.isfinite(pm) else 0
+    return 1 if prior.get("budget_notified") else 0   # 0.2.x ledgers: bool only
+
+
+def _write_ledger(ledger, data):
+    LEDGER_DIR.mkdir(parents=True, exist_ok=True)
+    # Per-process temp names: concurrent SubagentStop hooks must never
+    # interleave writes into a shared temp file.
+    tmp = ledger.with_suffix(f".{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(data, indent=1), encoding="utf-8")
+    tmp.replace(ledger)
+    link_tmp = LEDGER_DIR / f".latest.{os.getpid()}.tmp"
+    try:
+        link_tmp.symlink_to(ledger)
+        link_tmp.replace(LEDGER_DIR / "latest.json")
+    except OSError:
+        link_tmp.unlink(missing_ok=True)
+
+
+def run_hook():
+    """Stop/SubagentStop entry point: exit 0 for ANY stdin bytes, and write
+    nothing to stdout but the hook protocol's own JSON. A non-zero exit or a
+    traceback here breaks the user's session, so no exception class may
+    escape — not even from the diagnostics."""
+    try:
+        return _run_hook(_hook_payload())
+    except Exception as e:  # noqa: BLE001 — a hook must never break the session
+        _hook_warn(f"hook: {type(e).__name__}: {e}")
+        return 0
+
+
+def _run_hook(payload):
+    if payload is None:
         return 0
     transcript = payload.get("transcript_path")
     session_id = re.sub(r"[^A-Za-z0-9_-]", "", str(payload.get("session_id", "unknown"))) or "unknown"
+    # A non-string transcript_path is not a path: Path() would raise TypeError.
     if not isinstance(transcript, str) or not transcript or not Path(transcript).exists():
         return 0
     transcript = Path(transcript)
@@ -1456,62 +1534,42 @@ def run_hook():
             return 0  # never ledger sidechain-only data under the session id
         transcript = main
     is_subagent_stop = payload.get("hook_event_name") == "SubagentStop"
+    data = aggregate(parse_session(transcript), load_pricing())
+    data["session_id"] = session_id
+    data["transcript_path"] = str(transcript)
+    ledger = LEDGER_DIR / f"{session_id}.json"
+
+    prior_multiple = _prior_budget_multiple(ledger)
+    limit = budget_from_env()
+    cost = data["total"]["cost_usd"]
+    priced = cost is not None and math.isfinite(cost)
+    multiple = int(cost // limit) if (limit and priced) else 0
+    # Parallel SubagentStop hooks race the ledger read-modify-write, so
+    # only the (serial) Stop hook fires nudges and advances the counter.
+    fire = multiple > prior_multiple and not is_subagent_stop
+    notified = multiple if fire else prior_multiple
+    data["budget_notified"] = notified >= 1
+    data["budget_notified_multiple"] = notified
+
     try:
-        data = aggregate(parse_session(transcript), load_pricing())
-        data["session_id"] = session_id
-        data["transcript_path"] = str(transcript)
-        LEDGER_DIR.mkdir(parents=True, exist_ok=True)
-        ledger = LEDGER_DIR / f"{session_id}.json"
-
-        prior_multiple = 0
-        if ledger.exists():
-            try:
-                prior = json.loads(ledger.read_text())
-                if isinstance(prior, dict):
-                    pm = prior.get("budget_notified_multiple")
-                    if isinstance(pm, (int, float)):
-                        prior_multiple = int(pm)
-                    elif prior.get("budget_notified"):  # 0.2.x ledgers: bool only
-                        prior_multiple = 1
-            except (json.JSONDecodeError, OSError):
-                pass
-        limit = budget_from_env()
-        cost = data["total"]["cost_usd"]
-        multiple = int(cost // limit) if (limit and limit > 0 and cost is not None) else 0
-        # Parallel SubagentStop hooks race the ledger read-modify-write, so
-        # only the (serial) Stop hook fires nudges and advances the counter.
-        fire = multiple > prior_multiple and not is_subagent_stop
-        notified = multiple if fire else prior_multiple
-        data["budget_notified"] = notified >= 1
-        data["budget_notified_multiple"] = notified
-
-        # Per-process temp names: concurrent SubagentStop hooks must never
-        # interleave writes into a shared temp file.
-        tmp = ledger.with_suffix(f".{os.getpid()}.tmp")
-        tmp.write_text(json.dumps(data, indent=1))
-        tmp.replace(ledger)
-        link_tmp = LEDGER_DIR / f".latest.{os.getpid()}.tmp"
-        try:
-            link_tmp.symlink_to(ledger)
-            link_tmp.replace(LEDGER_DIR / "latest.json")
-        except OSError:
-            link_tmp.unlink(missing_ok=True)
-        if fire:
-            top = "—"
-            if data["by_label"]:
-                top = max(data["by_label"].items(),
-                          key=lambda kv: kv[1]["cost_usd"] or 0)[0]
-            passed = (f"{multiple}× your ${limit:.2f} budget" if multiple >= 2
-                      else f"your ${limit:.2f} budget")
-            print(json.dumps({"systemMessage":
-                f"token-usage: session estimate ${cost:.2f} has passed "
-                f"{passed} — top consumer: {top}"}))
-
-    except Exception as e:  # noqa: BLE001 — a hook must never break the session
+        _write_ledger(ledger, data)
+    except Exception as e:  # noqa: BLE001 — a broken ledger must not break the session
         # stdout is the hook protocol, so the only channel left is stderr:
         # silence here means the budget nudge is dead with no way to find out.
-        warn(f"hook: ledger update failed: {e}")
-        return 0  # a broken ledger update must never break the session
+        _hook_warn(f"hook: ledger update failed: {e}")
+    if fire:
+        # The nudge is the plugin's headline feature: it is emitted even when
+        # the ledger write failed, as long as it could still be computed.
+        top = "—"
+        if data["by_label"]:
+            top = max(data["by_label"].items(),
+                      key=lambda kv: kv[1]["cost_usd"] or 0)[0]
+        passed = (f"{multiple}× your ${limit:.2f} budget" if multiple >= 2
+                  else f"your ${limit:.2f} budget")
+        # ensure_ascii (the default) keeps this printable on an ASCII stdout.
+        print(json.dumps({"systemMessage":
+            f"token-usage: session estimate ${cost:.2f} has passed "
+            f"{passed} — top consumer: {top}"}))
     return 0
 
 
