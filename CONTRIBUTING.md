@@ -35,8 +35,20 @@ python3 scripts/token_usage.py json  path/to/session.jsonl
 
 ## Testing a change
 
-There is no formal test suite yet (contributions welcome — pytest, stdlib
-fixtures only). Until then, verify against real transcripts:
+Run the suite on both supported interpreters, with warnings as errors. CI
+runs exactly these three commands on a 3.9 / 3.12 matrix (`ruff==0.16.6`):
+
+```bash
+python3.9  -m pytest tests/ -v -W error    # the floor: no 3.10+ syntax
+python3.12 -m pytest tests/ -v -W error    # stdlib fixtures only, no network
+ruff check scripts tests
+```
+
+On macOS the 3.9 interpreter is `/usr/bin/python3`; any 3.9 and any ≥3.10
+interpreter you have will do, and `-q` is fine locally — CI uses `-v` only for
+readable logs.
+
+Then verify against real transcripts:
 
 1. Run `report` against a few of your own transcripts in
    `~/.claude/projects/<project-slug>/`, including at least one session that

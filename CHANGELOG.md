@@ -15,12 +15,32 @@ adheres to [Semantic Versioning](https://semver.org/).
   desktop can register the same script). Tools: `session_cost`, `history`,
   `insights`, `diff`, `top_consumers`; `format: json|markdown`; tool failures
   are `isError` results, protocol problems are JSON-RPC errors; nothing but
-  JSON-RPC reaches stdout. Current session resolves from
-  `TOKEN_USAGE_PROJECT_DIR` (`${CLAUDE_PROJECT_DIR}`), then the Cowork mount,
-  then the newest transcript anywhere.
+  JSON-RPC reaches stdout. "Current session" resolves in order: explicit
+  `transcript` → `session_id` → `TOKEN_USAGE_TRANSCRIPT` → the newest session
+  for `TOKEN_USAGE_PROJECT_DIR` (or `CLAUDE_PROJECT_DIR`), which fails closed
+  rather than falling through to another project → and only when no project
+  dir is set: the cwd's own project, the Cowork mount, then the newest
+  transcript anywhere.
+- **MCP results disclose how they were produced.** `session_cost` and
+  `insights` carry `resolved_via` (`explicit`, `session_id`, `env`,
+  `project_dir`, `cwd`, `cowork`, `any_project`) in JSON, and their markdown
+  adds a note when the session was merely the newest one found (`cwd` /
+  `any_project`). Every tool result carries a `warnings` list in JSON and a
+  `Warning: <text>` footnote per warning in markdown, so pricing-overlay
+  problems and a non-numeric `TOKEN_USAGE_BUDGET_USD` — stderr lines on the
+  CLI, invisible over MCP — reach the caller. `TOKEN_USAGE_PROJECT_DIR` that
+  is blank or still holds an unexpanded `${CLAUDE_PROJECT_DIR}` (Claude Code
+  before 2.1.139, or another host) counts as unset and falls back to
+  discovery instead of erroring on every call.
 - **`top_consumers` subcommand** — costliest sessions (`--by session`) or
   command labels aggregated across sessions (`--by command`) in a window;
-  `--since`, `--project`, `--limit`, `--json`. Unpriced rows sort last.
+  `--since`, `--project`, `--limit`, `--json`. Unpriced rows sort last and are
+  disclosed: session mode reports `unpriced_rows` for the window (with a
+  footnote when `--limit` cut any of them), and command mode marks a label
+  `"partial": true` whenever any of its usage ran on an unpriced model —
+  including a single session that mixed a priced and an unpriced model under
+  one label, where the per-session cost is a number and hides the gap — so a
+  priced subtotal is never mistaken for the whole cost.
 - **Session-id lookup** — `locate_transcript()` resolves a Claude Code session
   id across every project; `resolve_transcript()` now fails cleanly on a
   non-existent explicit path (`transcript not found: <path>`) instead of
@@ -48,27 +68,189 @@ adheres to [Semantic Versioning](https://semver.org/).
   anchor on, but it also means running these commands from a directory with
   no Claude Code history of its own can silently analyse a different
   project's most recent session instead of failing — pass an explicit
-  transcript path or session id when that matters.
+  transcript path or session id when that matters. MCP callers only reach
+  this fallback when no project dir is set; with one, a project that has no
+  sessions yet is an error.
 - **`report` and `insights` now name the transcript they measured.** The
-  markdown `report` ends with a `Session: <project-slug>/<session>.jsonl`
-  line, `insights` text output appends `(session: <project-slug>/<session>.jsonl)`,
-  and `insights --json` gains `transcript_path` in session mode. Auto-discovery
-  can land on a session in a different project (see the fallback change
-  above), so which one was analysed is no longer left implicit. Scripts
-  parsing the text output should expect the extra trailing line.
+  markdown `report` gains a `Session: <project-slug>/<session>.jsonl` line
+  directly below the table (the cache-savings, unpriced and `Models:` lines
+  still follow it), `insights` text output gains an extra
+  `(session: <project-slug>/<session>.jsonl)` — appended as its own line when
+  rules fired, and on the same line as `No notable findings.` when none did —
+  and `insights --json` gains `transcript_path` in session mode.
+  Auto-discovery can land on a session in a different project (see the
+  fallback change above), so which one was analysed is no longer left
+  implicit. Scripts parsing the text output should expect the extra line.
+- **MCP argument checking is stricter and speaks its own vocabulary.** A bad
+  window value now reads `invalid since value …` (the CLI still says
+  `--since`); `since`/`project` reject the empty string; `budget_usd` must be
+  greater than 0; `transcript` and `session_id` together, and `project`
+  without `since` on `insights` (window mode is the only mode that filters by
+  project), are rejected instead of one silently winning; and a float where an integer is required reads
+  `limit must be an integer`. A handler that exits without a message reports
+  `<tool>: exited with status <code>` and an unexpected exception now leaves a
+  traceback on stderr for the host log.
+- **`top_consumers --by command` on an empty window** says "No commands in
+  window." rather than "No sessions in window.".
+- **The `report` skill also allows the user-scope tool names**
+  (`mcp__token-usage__*`) alongside the plugin's
+  `mcp__plugin_token-usage_token-usage__*`, so a hand-registered server is
+  usable from the skill.
+- **CI runs `ruff check scripts tests`** (ruff's default rule set, no config
+  file) alongside the pytest matrix.
 - **Sonnet 5 priced at $2/$10** (was $3/$15). Anthropic made the launch
   price permanent in September 2026 instead of raising it, so the "promo not
   modelled" caveat is gone. Sonnet 5 session costs drop by a third vs 0.5.0.
 
 ### Fixed
 
+- **A corpus scan no longer reports "no usage" as a success.** An unwritable
+  cache directory (`TOKEN_USAGE_LEDGER_DIR` / `~/.cache/token-usage/index`)
+  made `history`, `top_consumers`, window `insights` and the `insights`
+  baseline skip every transcript and print an empty table; a single
+  unreadable transcript disappeared the same way. Cache-write failures now
+  warn once per process and the freshly parsed summary is used anyway, and an
+  unreadable transcript is warned about on stderr, listed as
+  `skipped_transcripts` in the JSON — at the top level in both `insights`
+  modes, since a thinned baseline silently switches every session-mode rule
+  off — and footnoted in the markdown.
+- **`insights` no longer prints a clean bill of health when the rules could
+  not run.** An empty findings list also covered a window scan that matched no
+  sessions at all (a missing or mistyped `TOKEN_USAGE_PROJECTS_DIR`, a fresh
+  machine, a `--project` substring matching no slug) and a session-mode
+  baseline below the five prior sessions the comparison rules need — only
+  `--json`'s `baseline.sessions` gave either away. The window case now reads
+  `No sessions in window — nothing was scanned.` (matching `top_consumers`),
+  and the session case appends `(baseline: N prior session(s); the comparison
+  rules need 5)` after the session name. A window whose sessions all land
+  after its midpoint — any window longer than the project's history — is
+  disclosed the same way: the spend-trend and top-mover rules are gated on the
+  first half holding spend, so it appends `(baseline: no spend in the window's
+  first half; the trend rules need both halves)`, and `--json` carries
+  `baseline.first_half_sessions` / `first_half_cost`. Both qualifiers are
+  appended whether or not findings fired, since the rules that need no
+  baseline (ad-hoc dominance, unpriced models) fire happily on a young project
+  — a single `[info]` line was being handed over as the whole story for a
+  10,000× session.
+- **The Stop hook survives well-formed JSON that isn't a hook payload.**
+  `null`, a list, a bare string or a non-string `transcript_path` on stdin got
+  past the `JSONDecodeError` guard and then raised `AttributeError` /
+  `TypeError` outside the broad catch, exiting 1 with a traceback — the one
+  thing a hook must never do. Non-object payloads and non-string transcript
+  paths now exit 0 in silence.
+- **`insights --project` without `--since` is an error, not a silent
+  no-op.** `insights --project other` (and the MCP `insights
+  {"project": …}`) took the session-mode path with the filter dropped, so it
+  answered about whatever session discovery found, quite possibly in another
+  project, with no warning. Both now say `--project applies to window mode
+  (use --since)`.
+- **The Stop hook says when it could not write the ledger.** An unwritable
+  `TOKEN_USAGE_LEDGER_DIR` / `~/.cache/token-usage` (read-only home, a
+  root-owned directory, a full disk) killed the budget nudge with no output
+  on any channel; the hook now warns on stderr
+  (`token-usage: hook: ledger update failed: …`) and still exits 0. It also
+  flushes stdout while a failure can still be handled: a reader that closed
+  the pipe used to turn a successful hook into rc=120 at interpreter
+  shutdown, long after the hook body returned.
+- **A broken `TOKEN_USAGE_TRANSCRIPT` is diagnosed by name.** Both the CLI and
+  the MCP server used to answer "no transcript found"; they now say
+  `TOKEN_USAGE_TRANSCRIPT is set to <path> but that file does not exist`.
 - **History index no longer serves stale costs after a pricing change.**
   Cached per-transcript summaries bake `cost_usd` in but were re-validated
   only by (mtime, size), so `history --by project|day|command` and the
   `insights` 30-day baseline kept pricing old rates until a transcript
   changed. Entries now also carry a fingerprint of the effective pricing
   table (bundled + overlay) and re-parse when it differs. Expect a one-off
-  full re-scan on first run after upgrading.
+  full re-scan on first run after upgrading — `INDEX_VERSION` is also 3→4 in
+  this release, so per-label entries can record whether any of their usage was
+  unpriced.
+- **The Stop hook survives any bytes at all on stdin.** `json.load(sys.stdin)`
+  decodes before it parses, so a non-UTF-8 byte raised `UnicodeDecodeError` —
+  a `ValueError`, but not a `json.JSONDecodeError` — straight past the guard:
+  exit 1 with a traceback on every Stop/SubagentStop, and the ledger plus
+  budget nudge silently dead for the rest of the session. The payload is now
+  read as bytes and decoded as UTF-8 (which is what JSON is) with
+  `errors="replace"`, whatever the locale says, so a POSIX-locale
+  launchd/cron/container run also stops dying on an accented transcript path;
+  and the whole hook body — diagnostics included — is wrapped so no exception
+  class can escape. The nudge is computed before the ledger is written and is
+  now emitted even when that write fails.
+- **A few undecodable bytes in a transcript no longer traceback.**
+  Transcripts, cache entries, ledgers, pricing layers and the plugin manifest
+  are read as UTF-8 with `errors="replace"`, so `report`, `json`, `insights`,
+  the hook and the corpus scan all survive a corrupt line instead of exiting
+  1 on it. The MCP server reads its stdin the same way: one 0xff byte used to
+  kill the process with rc=1 and *zero* replies, losing valid requests queued
+  ahead of it, where it is now an ordinary `-32700` parse error. The loss is
+  disclosed rather than absorbed: a transcript warns once on stderr
+  (`token-usage: <path>: N line(s) had undecodable bytes`) for the lines it
+  dropped, and a transcript that decodes to nothing parseable at all stays a
+  *skipped* transcript — warned about, listed in `skipped_transcripts` and
+  never counted in the Calls column as a free session.
+- **A projects directory that cannot be read is disclosed, not answered with
+  zeros.** `Path.glob()` on a non-existent path — or on a regular file, or on
+  a directory this process may not list (`chmod 000`, a permission-denied
+  mount) — yields nothing rather than raising, so a mistyped
+  `TOKEN_USAGE_PROJECTS_DIR`, an MCP server started with a different `HOME` or
+  an unmounted sandbox answered "what did I spend this week" with a clean,
+  successful, empty table. Every
+  corpus-scanning entry point (`history`, `top_consumers`, window `insights`,
+  the `insights` baseline) now reports `projects_dir_missing` in `--json`,
+  footnotes `No readable Claude Code projects directory at <path> — nothing was
+  scanned.` in markdown, warns on stderr and passes it to MCP `warnings`.
+- **A calendar-invalid `--since` is rejected instead of crashing.**
+  `--since 2026-09-31` (September has 30 days; likewise `2026-02-30`,
+  `2025-02-29`, `2026-13-45`, `2026-09-01 lunchtime`) passed the shape check
+  and then died inside `insights` window mode with a raw
+  `ValueError: day is out of range for month`, while `history` took the same
+  value and silently matched nothing. Both now say
+  `invalid --since value '…' — use Nd (e.g. 7d) or YYYY-MM-DD` (`invalid
+  since value …` over MCP). A relative window is capped at 36500d (100 years)
+  for the same reason: `--since 999999999999d` overflowed `timedelta` and
+  exited 1 with an `OverflowError` traceback (over MCP, an `isError` reading
+  "Python int too large to convert to C int").
+- **Pricing rates must be finite and non-negative.** `json.loads` accepts the
+  bare `NaN`/`Infinity` literals (and `1e400` overflows to `inf`), so a user
+  overlay carrying one produced a `"cost_usd": NaN` in the MCP JSON payload —
+  not RFC-8259 JSON, unparseable by a strict client — and in the Stop-hook
+  ledger, and made the hook's `int(cost // limit)` raise on every Stop, which
+  killed the budget nudge behind a single stderr line. Such entries are now
+  warned about and skipped like any other invalid rate; `0` remains legal for
+  free tiers.
+- **`TOKEN_USAGE_BUDGET_USD=0` (or negative, or `nan`) says so.** It parsed
+  fine and then silently switched off both the hook's nudge and the
+  `insights` budget-pace rule, leaving the user believing budget monitoring
+  was armed. It is now reported —
+  `ignoring TOKEN_USAGE_BUDGET_USD='0' — must be > 0` — like a non-numeric
+  typo, on stderr and in MCP `warnings`.
+- **The unwritable-cache warning reaches MCP callers.** It was stderr-only
+  and once per process, so a long-lived server re-parsed the whole corpus on
+  every query in silence. It now travels in `warnings` for every call while
+  staying once-per-process on stderr.
+- **MCP rejects `NaN`/`Infinity` numbers and a non-object `arguments`.**
+  `NaN` compares False against every bound, so `{"budget_usd": NaN}` ran the
+  tool with the budget rule silently disabled; and `arguments` of `[]`, `0`,
+  `""` or `false` was coerced to `{}`, answering about a session discovery
+  guessed at instead of reporting the malformed call (now `-32602`; a missing
+  or null `arguments` still means "no arguments").
+- **The window caveat can no longer contradict the findings above it.**
+  `insights --since` rounded the first half's cost to 6dp for the payload but
+  the trend rules ran on the unrounded value, so a first half holding under
+  ~$5e-7 (a few cache-read tokens) printed a spend-trend finding directly
+  above "(baseline: no spend in the window's first half)". The window is now
+  split once and shared with the rules, `--json` carries
+  `baseline.first_half_spend` (the rules' own predicate) and the qualifier
+  keys off it — and distinguishes `no sessions in the window's first half`
+  from `no spend`, which the old wording could not.
+- **`top_consumers` marks the rows its footnote is about.** A session or
+  command whose cost is only a priced subtotal now renders `$2.00*` and is
+  counted in `N session(s)/command(s) partially priced (marked *)`; session
+  rows gained the `partial` flag command rows already had, and the count no
+  longer includes rows that are wholly unpriced and already show `—`. A
+  session mixing a priced and an unpriced model used to rank above an honest
+  row with twice the tokens and the same figure, with nothing to show for it.
+- **CI runs the suite the way the contributor guide does** — `-W error` on
+  both interpreters, with `ruff` pinned to the version used locally.
 
 ## [0.5.0] — 2026-07-09
 

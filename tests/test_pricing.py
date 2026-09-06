@@ -103,7 +103,7 @@ def test_unpriced_models_skips_zero_usage_pseudo_model(tu):
 
 
 def test_report_footnote_for_unpriced_model(tu, tmp_path):
-    from conftest import usage, user, assistant, write_jsonl
+    from conftest import assistant, usage, user, write_jsonl
     t = write_jsonl(tmp_path / "s.jsonl", [
         user("2026-07-01T10:00:00Z", command="/go"),
         assistant("2026-07-01T10:00:05Z", usage(inp=10, out=20),
@@ -116,7 +116,7 @@ def test_report_footnote_for_unpriced_model(tu, tmp_path):
 
 
 def test_no_footnote_when_all_priced(tu, tmp_path):
-    from conftest import usage, user, assistant, write_jsonl
+    from conftest import assistant, usage, user, write_jsonl
     t = write_jsonl(tmp_path / "s.jsonl", [
         user("2026-07-01T10:00:00Z", command="/go"),
         assistant("2026-07-01T10:00:05Z", usage(inp=10, out=20), request_id="r1"),
@@ -127,7 +127,7 @@ def test_no_footnote_when_all_priced(tu, tmp_path):
 
 
 def test_history_collects_unpriced(tu, monkeypatch, tmp_path):
-    from conftest import usage, user, assistant, write_jsonl
+    from conftest import assistant, usage, user, write_jsonl
     monkeypatch.setenv("TOKEN_USAGE_PROJECTS_DIR", str(tmp_path / "projects"))
     monkeypatch.setenv("TOKEN_USAGE_LEDGER_DIR", str(tmp_path / "cache"))
     write_jsonl(tmp_path / "projects" / "proj-a" / "s1.jsonl", [
@@ -138,3 +138,78 @@ def test_history_collects_unpriced(tu, monkeypatch, tmp_path):
     data = tu.run_history(by="project")
     assert data["unpriced_models"] == ["claude-mystery-9"]
     assert "unpriced" in tu.render_history(data)
+
+
+def test_load_pricing_collects_its_warnings(tu, tmp_path, monkeypatch, capsys):
+    # The overlay silently reverting to bundled rates is exactly the kind of
+    # thing an MCP caller cannot see on stderr — collect the same text.
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+    overlay = tu.user_pricing_path()
+    overlay.parent.mkdir(parents=True)
+    overlay.write_text("{not json")
+    warnings = []
+    tu.load_pricing(warnings)
+    assert warnings == [f"ignoring malformed pricing file {overlay}"]
+    assert "token-usage: ignoring malformed pricing file" in capsys.readouterr().err
+
+    overlay.write_text(json.dumps({"claude-x": {"input": "free", "output": 1.0}}))
+    warnings = []
+    tu.load_pricing(warnings)
+    assert warnings == [f"ignoring invalid rates for claude-x in {overlay}"]
+
+    overlay.write_text(json.dumps({"claude-x": {"input": 1.0, "output": 2.0}}))
+    warnings = []
+    assert tu.load_pricing(warnings)["claude-x"] == {"input": 1.0, "output": 2.0}
+    assert warnings == []
+
+
+def test_budget_from_env_warns_about_junk(tu, monkeypatch, capsys):
+    monkeypatch.delenv("TOKEN_USAGE_BUDGET_USD", raising=False)
+    warnings = []
+    assert tu.budget_from_env(warnings) is None and warnings == []   # unset is silent
+    monkeypatch.setenv("TOKEN_USAGE_BUDGET_USD", "ten pounds")
+    assert tu.budget_from_env(warnings) is None
+    assert warnings == ["ignoring TOKEN_USAGE_BUDGET_USD='ten pounds' — not a number"]
+    assert "not a number" in capsys.readouterr().err
+    monkeypatch.setenv("TOKEN_USAGE_BUDGET_USD", "12.5")
+    assert tu.budget_from_env() == 12.5
+
+
+def test_non_finite_and_negative_rates_are_rejected(tu, monkeypatch, tmp_path, capsys):
+    # json.loads accepts the bare NaN/Infinity literals, and 1e400 overflows to
+    # inf: an overlay carrying one used to poison every cost — a "cost_usd": NaN
+    # in the MCP json payload (not RFC-8259 JSON, unparseable by a strict
+    # client) and in the Stop-hook ledger, and int(cost // limit) raising on
+    # every Stop, which killed the budget nudge behind one stderr line.
+    p = tmp_path / "cfg" / "token-usage" / "pricing.json"
+    p.parent.mkdir(parents=True)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+    for raw in ("NaN", "Infinity", "-Infinity", "1e400", "-1000", "-0.5"):
+        p.write_text('{"claude-sonnet-4-5": {"input": ' + raw + ', "output": 15.0}}')
+        warnings = []
+        pricing = tu.load_pricing(warnings)
+        assert pricing["claude-sonnet-4-5"] == {"input": 3.0, "output": 15.0}, raw
+        assert warnings == [("ignoring invalid rates for claude-sonnet-4-5 in "
+                             f"{tu.user_pricing_path()}")], raw
+        capsys.readouterr()
+    # A huge integer literal is a float overflow away from inf, and 0 is a
+    # legitimate free-tier rate.
+    p.write_text('{"claude-sonnet-4-5": {"input": ' + "9" * 400 + ', "output": 0}}')
+    warnings = []
+    assert tu.load_pricing(warnings)["claude-sonnet-4-5"] == {"input": 3.0, "output": 15.0}
+    assert warnings and "claude-sonnet-4-5" in warnings[0]
+    p.write_text('{"claude-sonnet-4-5": {"input": 0, "output": 0.0}}')
+    assert tu.load_pricing()["claude-sonnet-4-5"] == {"input": 0, "output": 0.0}
+    capsys.readouterr()
+
+
+def test_costs_stay_json_serialisable_with_a_poisoned_overlay(tu, monkeypatch, tmp_path, capsys):
+    p = tmp_path / "cfg" / "token-usage" / "pricing.json"
+    p.parent.mkdir(parents=True)
+    p.write_text('{"claude-fable-5": {"input": NaN, "output": NaN}}')
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+    pricing = tu.load_pricing()
+    cost = tu.cost_usd({"claude-fable-5": dict(tu.empty_usage(), output=1_000_000)}, pricing)
+    assert cost == 50.0
+    assert json.loads(json.dumps({"cost_usd": cost}, allow_nan=False))["cost_usd"] == 50.0
+    capsys.readouterr()

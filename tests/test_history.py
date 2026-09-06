@@ -199,7 +199,7 @@ def test_sum_by_day_timestampless_requests_fall_to_first_day(tu, tmp_path):
     assert tu.sum_buckets(next(iter(by_day.values())))["output"] == 150
 
 
-def test_summarize_transcript_has_by_day_and_version_3(tu, monkeypatch, tmp_path):
+def test_summarize_transcript_has_by_day_and_the_current_version(tu, monkeypatch, tmp_path):
     monkeypatch.setenv("TOKEN_USAGE_LEDGER_DIR", str(tmp_path / "cache"))
     t = write_jsonl(tmp_path / "projects" / "p" / "s.jsonl", [
         user("2026-07-01T10:00:00Z"),
@@ -207,7 +207,7 @@ def test_summarize_transcript_has_by_day_and_version_3(tu, monkeypatch, tmp_path
         assistant("2026-07-02T01:00:00Z", usage(inp=10, out=300), request_id="r2"),
     ])
     s = tu.summarize_transcript(t, tu.load_pricing())
-    assert s["version"] == 3
+    assert s["version"] == tu.INDEX_VERSION == 4
     assert len(s["by_day"]) == 2
     assert sum(d["usage"]["output"] for d in s["by_day"].values()) == 400
     assert all(d["cost_usd"] is not None for d in s["by_day"].values())
@@ -233,17 +233,18 @@ def test_v2_index_entry_reparses_once(tu, monkeypatch, tmp_path):
         assistant("2026-07-01T10:00:05Z", usage(out=100), request_id="r1"),
     ])
     s1, hit1 = tu.cached_summary(t, tu.load_pricing())
-    assert not hit1 and s1["version"] == 3
+    assert not hit1 and s1["version"] == tu.INDEX_VERSION
     # forge a stale v2 entry: same mtime/size but version 2 and no by_day
-    import hashlib, json as j
+    import hashlib
+    import json as j
     cache_file = tu.index_dir() / (hashlib.sha1(str(t).encode()).hexdigest() + ".json")
     stale = j.loads(cache_file.read_text())
     stale["version"] = 2
     stale.pop("by_day")
     cache_file.write_text(j.dumps(stale))
     s2, hit2 = tu.cached_summary(t, tu.load_pricing())
-    assert not hit2 and s2["version"] == 3 and "by_day" in s2   # re-parsed
-    s3, hit3 = tu.cached_summary(t, tu.load_pricing())
+    assert not hit2 and s2["version"] == tu.INDEX_VERSION and "by_day" in s2  # re-parsed
+    _s3, hit3 = tu.cached_summary(t, tu.load_pricing())
     assert hit3                                                  # now cached
 
 
@@ -276,8 +277,256 @@ def test_index_recomputes_when_pricing_changes(tu, monkeypatch, tmp_path):
     old = {"claude-sonnet-5": {"input": 3.0, "output": 15.0}}
     new = {"claude-sonnet-5": {"input": 2.0, "output": 10.0}}
     s1, hit1 = tu.cached_summary(t, old)
-    s2, hit2 = tu.cached_summary(t, old)
+    _s2, hit2 = tu.cached_summary(t, old)
     s3, hit3 = tu.cached_summary(t, new)
     assert (hit1, hit2, hit3) == (False, True, False)
     assert s1["total"]["cost_usd"] == 15.0
     assert s3["total"]["cost_usd"] == 10.0
+
+
+def test_unreadable_transcripts_are_skipped_and_disclosed(tu, tmp_path, monkeypatch):
+    # A directory named like a transcript (IsADirectoryError) used to be
+    # swallowed silently: every row vanished and the caller was told "no
+    # usage" with a clean exit. Skip it, say so on stderr, and name it.
+    proj = seed_projects(tmp_path, monkeypatch)
+    (proj / "-Users-x-repo-one" / "junk.jsonl").mkdir()
+    data = tu.run_history(by="project")
+    assert {r["key"] for r in data["rows"]} == {"-Users-x-repo-one", "-Users-x-repo-two"}
+    assert data["skipped_transcripts"] == [str(proj / "-Users-x-repo-one" / "junk.jsonl")]
+    out = tu.render_history(data)
+    assert "1 transcript(s) skipped (unreadable)" in out and "junk.jsonl" in out
+    top = tu.run_top_consumers(by="session", since="2026-01-01")
+    assert [r["session_id"] for r in top["rows"]] == ["s1", "s2"]
+    assert len(top["skipped_transcripts"]) == 1
+    assert "1 transcript(s) skipped (unreadable)" in tu.render_top_consumers(top)
+
+
+def test_iter_summaries_skips_a_non_dict_cache_entry(tu, tmp_path, monkeypatch, capsys):
+    # A cache file holding valid JSON that isn't an object used to crash the
+    # scan with AttributeError inside cached_summary's freshness check.
+    seed_projects(tmp_path, monkeypatch)
+    tu.run_history(by="project")
+    for f in (tmp_path / "cache" / "index").glob("*.json"):
+        f.write_text("[]")
+    skipped = []
+    rows = list(tu.iter_summaries(tu.load_pricing(), skipped=skipped))
+    assert len(rows) == 2 and skipped == []      # re-parsed, not skipped
+    assert capsys.readouterr().err == ""
+
+
+def test_unwritable_cache_dir_still_returns_rows(tu, tmp_path, monkeypatch, capsys):
+    import os as _os
+    if _os.geteuid() == 0:
+        import pytest as _pytest
+        _pytest.skip("root ignores directory permissions")
+    seed_projects(tmp_path, monkeypatch)
+    cache = tmp_path / "cache"
+    cache.mkdir(parents=True, exist_ok=True)
+    cache.chmod(0o500)
+    monkeypatch.setattr(tu, "_CACHE_WRITE_WARNED", False)
+    try:
+        data = tu.run_history(by="project")
+    finally:
+        cache.chmod(0o700)
+    by_key = {r["key"]: r for r in data["rows"]}
+    assert by_key["-Users-x-repo-one"]["usage"]["output"] == 100
+    assert by_key["-Users-x-repo-two"]["usage"]["output"] == 50
+    assert data["skipped_transcripts"] == []
+    err = capsys.readouterr().err
+    assert err.count("cannot write summary cache") == 1      # one warning per process
+
+
+def test_window_insights_and_baseline_disclose_skipped_transcripts(tu, tmp_path, monkeypatch):
+    proj = seed_projects(tmp_path, monkeypatch)
+    (proj / "-Users-x-repo-two" / "junk.jsonl").mkdir()
+    window = tu.run_insights(since="2026-01-01")
+    assert len(window["skipped_transcripts"]) == 1
+    assert "1 transcript(s) skipped (unreadable)" in tu.render_insights(window)
+    # The baseline carries the paths, not a count: session-mode insights
+    # footnotes them, and a thinned baseline switches every rule off.
+    baseline = tu.compute_baseline(tu.load_pricing(), project="-Users-x-repo-one")
+    assert baseline["skipped_transcripts"] == \
+        [str(proj / "-Users-x-repo-two" / "junk.jsonl")]
+
+
+def test_missing_projects_root_is_disclosed_not_an_empty_table(tu, tmp_path, monkeypatch, capsys):
+    # Path.glob() on a missing path — or on a regular file — yields nothing
+    # rather than raising, so the whole corpus scan reported a clean,
+    # successful, empty result: a mistyped TOKEN_USAGE_PROJECTS_DIR, an MCP
+    # server started with a different HOME or a sandbox mount answered "what
+    # did I spend this week" with a zero table and no signal at all.
+    monkeypatch.setenv("TOKEN_USAGE_LEDGER_DIR", str(tmp_path / "cache"))
+    missing = tmp_path / "nope"
+    a_file = tmp_path / "afile"
+    a_file.write_text("not a directory")
+    for root in (missing, a_file):
+        monkeypatch.setenv("TOKEN_USAGE_PROJECTS_DIR", str(root))
+        hist = tu.run_history(by="project")
+        assert hist["rows"] == [] and hist["projects_dir_missing"] == str(root)
+        assert f"No readable Claude Code projects directory at {root}" in tu.render_history(hist)
+        top = tu.run_top_consumers(since="30d")
+        assert top["rows"] == [] and top["projects_dir_missing"] == str(root)
+        assert f"No readable Claude Code projects directory at {root}" in tu.render_top_consumers(top)
+        window = tu.run_insights(since="30d")
+        assert window["projects_dir_missing"] == str(root)
+        assert f"No readable Claude Code projects directory at {root}" in tu.render_insights(window)
+        assert "no readable Claude Code projects directory" in capsys.readouterr().err
+        warnings = []
+        tu.run_history(by="project", warnings=warnings)
+        assert warnings == [f"no readable Claude Code projects directory at {root}"]
+        capsys.readouterr()
+
+
+def test_missing_projects_root_reaches_session_mode_insights(tu, tmp_path, monkeypatch, capsys):
+    # Session mode's only corpus scan is the baseline: with no projects root
+    # every baseline rule goes quiet, which is indistinguishable from an
+    # unremarkable session unless the scan says what it could not read.
+    t = write_jsonl(tmp_path / "proj" / "s.jsonl", [
+        user("2026-06-10T10:00:00Z", command="/review"),
+        assistant("2026-06-10T10:00:01Z", usage(out=100), request_id="r1"),
+    ])
+    monkeypatch.setenv("TOKEN_USAGE_PROJECTS_DIR", str(tmp_path / "nope"))
+    monkeypatch.setenv("TOKEN_USAGE_LEDGER_DIR", str(tmp_path / "cache"))
+    r = tu.run_insights(transcript=str(t))
+    assert r["projects_dir_missing"] == str(tmp_path / "nope")
+    assert f"No readable Claude Code projects directory at {tmp_path / 'nope'}" in tu.render_insights(r)
+    capsys.readouterr()
+
+
+def test_unwritable_cache_warning_reaches_a_warnings_list(tu, tmp_path, monkeypatch, capsys):
+    # A permanently unwritable cache dir makes every MCP query re-parse the
+    # whole corpus; stderr is invisible to an MCP caller, and the
+    # once-per-process suppression means a long-lived server prints it exactly
+    # once ever. The warnings list is the channel that reaches the caller.
+    import os as _os
+    if _os.geteuid() == 0:
+        import pytest as _pytest
+        _pytest.skip("root ignores directory permissions")
+    seed_projects(tmp_path, monkeypatch)
+    cache = tmp_path / "cache"
+    cache.mkdir(parents=True, exist_ok=True)
+    cache.chmod(0o500)
+    monkeypatch.setattr(tu, "_CACHE_WRITE_WARNED", False)
+    warnings = []
+    try:
+        tu.run_history(by="project", warnings=warnings)
+    finally:
+        cache.chmod(0o700)
+    assert [w for w in warnings if "cannot write summary cache" in w] == \
+        [w for w in warnings if "cannot write summary cache" in w][:1]   # once, not per file
+    assert any("cannot write summary cache" in w for w in warnings)
+    assert capsys.readouterr().err.count("cannot write summary cache") == 1
+
+
+def test_since_rejects_calendar_invalid_dates(tu):
+    import pytest
+    # The shape check let 31 September through, and window_halves then called
+    # datetime.fromisoformat on it: `insights --since 2026-09-31` exited 1 with
+    # a raw ValueError traceback, while `history --since` took the same value
+    # and silently filtered everything out.
+    for bad in ("2026-09-31", "2026-02-30", "2025-02-29", "2026-13-45",
+                "0000-00-00", "2026-09-01 lunchtime", "2026-09-01Tnope",
+                "2026-09-01T25:00:00Z"):
+        with pytest.raises(SystemExit) as e:
+            tu.since_cutoff(bad)
+        assert f"invalid --since value {bad!r}" in str(e.value), bad
+    for good in ("2026-09-01", "2028-02-29", "2026-09-01T10:00:00Z",
+                 "2026-09-01 10:00:00", "2026-09-01T10:00:00+01:00"):
+        assert tu.since_cutoff(good) == good, good
+
+
+def test_insights_since_typo_is_an_error_not_a_traceback(tmp_path, monkeypatch):
+    import subprocess
+    import sys
+
+    from conftest import SCRIPT
+    env = {**os.environ, "TOKEN_USAGE_PROJECTS_DIR": str(tmp_path / "projects"),
+           "TOKEN_USAGE_LEDGER_DIR": str(tmp_path / "cache")}
+    r = subprocess.run([sys.executable, str(SCRIPT), "insights", "--since", "2026-09-31"],
+                       capture_output=True, text=True, env=env, check=False)
+    assert r.returncode == 1
+    assert "Traceback" not in r.stderr
+    assert "invalid --since value '2026-09-31'" in r.stderr
+
+
+def test_non_positive_budget_env_is_reported(tu, monkeypatch):
+    # A budget of 0 (or a negative one, or NaN) parsed fine and then silently
+    # switched the hook's nudge and insights rule 6 off — the user believes
+    # budget monitoring is armed and never hears from it.
+    for raw in ("0", "0.0", "-10", "nan", "-inf"):
+        monkeypatch.setenv("TOKEN_USAGE_BUDGET_USD", raw)
+        warnings = []
+        assert tu.budget_from_env(warnings) is None, raw
+        assert warnings == [f"ignoring TOKEN_USAGE_BUDGET_USD={raw!r} — must be > 0"], raw
+    monkeypatch.setenv("TOKEN_USAGE_BUDGET_USD", "10")
+    warnings = []
+    assert tu.budget_from_env(warnings) == 10.0 and warnings == []
+
+
+def test_a_wholly_undecodable_transcript_is_skipped_not_counted(tu, tmp_path, monkeypatch,
+                                                                capsys):
+    # errors="replace" (added so a few bad bytes cannot crash every reader)
+    # also turned a binary .jsonl into a summary with no usage — which the
+    # corpus scan then COUNTED as a session, with nothing on stderr and
+    # nothing in skipped_transcripts. "There is nothing here to read" is not
+    # "you spent nothing".
+    proj = seed_projects(tmp_path, monkeypatch)
+    binary = proj / "-Users-x-repo-one" / "binary.jsonl"
+    binary.write_bytes(b"\xff\xfe\x00\x01\x02\n\xff\xff\xfe\n")
+    data = tu.run_history(by="project")
+    by_key = {r["key"]: r for r in data["rows"]}
+    assert by_key["-Users-x-repo-one"]["calls"] == 1          # the phantom session is gone
+    assert data["skipped_transcripts"] == [str(binary)]
+    err = capsys.readouterr().err
+    assert "skipping unreadable transcript" in err and "binary.jsonl" in err
+    assert "1 transcript(s) skipped (unreadable)" in tu.render_history(data)
+
+
+def test_an_unreadable_projects_root_is_disclosed_like_a_missing_one(tu, tmp_path,
+                                                                     monkeypatch, capsys):
+    # is_dir() alone passes a directory that cannot be listed: Path.glob()
+    # swallows the PermissionError and the scan reported a clean, successful,
+    # empty corpus with "projects_dir_missing": null actively asserting that
+    # nothing had gone wrong.
+    import os as _os
+    if _os.geteuid() == 0:
+        import pytest as _pytest
+        _pytest.skip("root ignores directory permissions")
+    proj = seed_projects(tmp_path, monkeypatch)
+    proj.chmod(0o000)
+    try:
+        assert proj.is_dir()                                  # the old check said "fine"
+        hist = tu.run_history(by="project")
+        top = tu.run_top_consumers(since="30d")
+    finally:
+        proj.chmod(0o700)
+    assert hist["rows"] == [] and hist["projects_dir_missing"] == str(proj)
+    assert f"No readable Claude Code projects directory at {proj}" in tu.render_history(hist)
+    assert top["projects_dir_missing"] == str(proj)
+    assert "no readable Claude Code projects directory" in capsys.readouterr().err
+
+
+def test_since_rejects_a_day_count_that_overflows(tu):
+    import pytest
+    # timedelta(days=999999999999) raised OverflowError: a typo exited 1 with a
+    # raw traceback on the CLI, and through MCP became an isError whose whole
+    # text was "Python int too large to convert to C int".
+    for bad in ("36501d", "3652058d", "999999999999d"):
+        with pytest.raises(SystemExit) as e:
+            tu.since_cutoff(bad)
+        assert f"invalid --since value {bad!r}" in str(e.value), bad
+    assert tu.since_cutoff("36500d")                          # a century still resolves
+
+
+def test_huge_since_is_an_error_not_an_overflow_traceback(tmp_path):
+    import subprocess
+    import sys
+
+    from conftest import SCRIPT
+    env = {**os.environ, "TOKEN_USAGE_PROJECTS_DIR": str(tmp_path / "projects"),
+           "TOKEN_USAGE_LEDGER_DIR": str(tmp_path / "cache")}
+    r = subprocess.run([sys.executable, str(SCRIPT), "history", "--since", "999999999999d"],
+                       capture_output=True, text=True, env=env, check=False)
+    assert r.returncode == 1
+    assert "Traceback" not in r.stderr
+    assert "invalid --since value '999999999999d'" in r.stderr

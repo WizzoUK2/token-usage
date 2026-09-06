@@ -27,6 +27,16 @@ def _isolated_pricing_overlay(monkeypatch, tmp_path_factory):
                        str(tmp_path_factory.mktemp("xdg-isolated")))
 
 
+@pytest.fixture(autouse=True)
+def _no_cowork_mounts(monkeypatch):
+    # Transcript discovery falls through to the Cowork sandbox mounts, which on
+    # a real Cowork host hold a live transcript this suite must never see.
+    # Neutralised once, for every test file, rather than per module — a test
+    # that reaches discovery indirectly must be hermetic too. A test that wants
+    # a mount sets its own roots afterwards.
+    monkeypatch.setattr(TOKEN_USAGE, "_cowork_roots", list)
+
+
 def usage(inp=0, out=0, cache_read=0, cache_5m=0, cache_1h=0):
     u = {"input_tokens": inp, "output_tokens": out, "cache_read_input_tokens": cache_read}
     if cache_5m or cache_1h:

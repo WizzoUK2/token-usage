@@ -42,7 +42,9 @@ Claude Code tells you session totals (`/cost`, OTel metrics) and tools like ccus
   Claude Code starts it automatically with the plugin; Claude desktop can register the
   same script. JSON by default, `format: "markdown"` for the rendered tables.
 - **Top consumers** — `top_consumers --by session|command` lists the costliest sessions
-  or command labels in a window, the question `history` could not answer directly.
+  or command labels in a window, the question `history` could not answer directly. A row
+  whose cost is only a priced subtotal (some of its usage ran on an unpriced model) is
+  marked `*` and footnoted, since the rows are ranked on that number.
 
 ## Installation
 
@@ -123,7 +125,8 @@ With no argument, `report` and `json` pick the most recent session for the curre
 
 ### Budget nudges
 
-Set `TOKEN_USAGE_BUDGET_USD` in the environment Claude Code runs hooks with (e.g. the `env` block of `~/.claude/settings.json`):
+Set `TOKEN_USAGE_BUDGET_USD` (a number greater than zero — anything else is ignored
+with a warning on stderr) in the environment Claude Code runs hooks with (e.g. the `env` block of `~/.claude/settings.json`):
 
 ```json
 {
@@ -146,26 +149,34 @@ no install). When the plugin is enabled, Claude Code starts it and the tools app
 
 | Tool | What it answers |
 |---|---|
-| `session_cost` | Per-activity breakdown of one session (`transcript` or `session_id`; defaults to the current project's newest session). Result names the transcript analysed. |
+| `session_cost` | Per-activity breakdown of one session (`transcript` or `session_id`; defaults to the current project's newest session). The result's `transcript` key names the transcript analysed, and `resolved_via` names the rung that found it. |
 | `history` | Cross-session rollup `by` project / day / command / model, with `since` and `project` filters. |
 | `insights` | Rule-based findings: session mode (one session vs the project's 30-day norms) or window mode (`since`). Optional `budget_usd`. |
 | `diff` | Per-activity cost and output deltas between two sessions (paths or session ids). |
 | `top_consumers` | Costliest sessions or command labels in a window (`by`, `since`, `project`, `limit`). |
 
-Every tool takes `format`: `json` (default, same shapes as the CLI's JSON output) or
-`markdown` (the rendered table). Failures come back as tool results with `isError`, never
-as protocol errors, so a missing transcript or a bad `since` is a readable message.
+Every tool takes `format`: `json` (default — the CLI's JSON shapes plus `transcript`,
+`resolved_via` and `warnings`) or `markdown` (the rendered table, with the same warnings
+as `Warning:` footnotes). Failures come back as tool results with `isError`, never as
+protocol errors, so a missing transcript or a bad `since` is a readable message.
+Malformed *calls* are the exception: an unknown method, or `arguments` that is present
+but not an object, is a JSON-RPC error (`-32602`) rather than an answer about a session
+the server guessed at.
 
 **"Current session"** resolves in this order: explicit `transcript` path → `session_id`
 (searched across every project) → `TOKEN_USAGE_TRANSCRIPT` → auto-discovery. What
 auto-discovery does depends on whether there is a project dir to anchor on:
 
-- **With `TOKEN_USAGE_PROJECT_DIR`** — which Claude Code always supplies, since the
-  plugin's `.mcp.json` passes `${CLAUDE_PROJECT_DIR}` — it is the newest transcript for
-  *that project only*. There is no fall-through: a project with no sessions yet is an
-  error, never a guess at some other project's session.
+- **With `TOKEN_USAGE_PROJECT_DIR`** — the plugin's `.mcp.json` passes
+  `${CLAUDE_PROJECT_DIR}`, which reaches stdio MCP servers from Claude Code 2.1.139;
+  older builds (and other hosts) leave it unexpanded or empty, which the server treats as
+  unset and falls back to discovery. When it *is* set, the session is the newest
+  transcript for *that project only*. There is no fall-through: a project with no
+  sessions yet is an error, never a guess at some other project's session.
 - **Without one** (Claude desktop, or the script run by hand): newest transcript for the
-  cwd's own project → the Cowork mount → newest transcript on the machine.
+  cwd's own project → the Cowork mount → newest transcript on the machine. In those last
+  two cases nobody named the session, so `resolved_via` says `cwd` / `any_project` and
+  the markdown carries a note saying which project it landed on.
 
 **Claude desktop / Cowork.** Add to `claude_desktop_config.json`:
 
@@ -186,8 +197,15 @@ or, for a Claude Code user scope outside the plugin:
 claude mcp add --scope user token-usage -- python3 /absolute/path/to/token-usage/scripts/mcp_server.py
 ```
 
+That route starts the server without `TOKEN_USAGE_PROJECT_DIR`, but Claude Code exports
+`CLAUDE_PROJECT_DIR` to stdio servers (2.1.139+) and the server reads it as a fallback, so
+"current session" still anchors on the project you are in. User-scope tools are named
+`mcp__token-usage__<tool>` rather than the plugin's
+`mcp__plugin_token-usage_token-usage__<tool>`.
+
 The server reads `~/.claude/projects` on the host, so a desktop session sees the same
-history the CLI does. No caching in-process: pricing overlay edits apply on the next call.
+history the CLI does. No caching in-process: pricing overlay edits apply on the next call
+(and a malformed overlay comes back in the result's `warnings`).
 
 ## Insights
 
@@ -203,7 +221,9 @@ Session mode (`insights [transcript]`) checks: cost outlier vs the 30-day projec
 
 Window mode (`insights --since 7d|30d|DATE [--project SUB]`) checks: spend trend between the first and second half of the window (warn ≥+50%, info ≥±25%), the top mover behind an increase (≥30% of it), and unpriced models anywhere in the window.
 
-No findings is a normal, healthy result — the tool prints `No notable findings.` rather than manufacturing something to say. `--json` returns the same findings as structured data for scripting.
+No findings is a normal, healthy result — the tool prints `No notable findings.` rather than manufacturing something to say. It also says when it *couldn't* fully look: a window that matched no sessions prints `No sessions in window — nothing was scanned.`, and a trailing `(baseline: …)` names rules that were switched off — `(baseline: N prior session(s); the comparison rules need 5)` in session mode when the project has fewer than the five prior sessions rules 1–2 need, and in window mode `(baseline: no sessions in the window's first half; the trend rules need both halves)` when every matched session lands after the window's midpoint, or `(baseline: no spend in the window's first half; …)` when the first half held sessions but no spend. That qualifier is appended whether or not anything fired: several rules need no baseline, so findings are no evidence the rest ran. `--json` returns the same findings as structured data for scripting, with the counts behind the qualifier under `baseline` (`sessions`, and in window mode `first_half_sessions` / `first_half_cost` / `first_half_spend` — the last being the rules' own unrounded predicate).
+
+Every command that scans the corpus (`history`, `top_consumers`, window `insights`, and the `insights` baseline) also says when it had nothing to scan: a `TOKEN_USAGE_PROJECTS_DIR` that is missing, is not a directory, or cannot be listed is reported as `projects_dir_missing` in `--json` and footnoted `No readable Claude Code projects directory at <path> — nothing was scanned.`, instead of a confident empty table.
 
 ## How it works
 

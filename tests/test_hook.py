@@ -12,7 +12,7 @@ def run_hook(payload, tmp_path, extra_env=None):
     env.update(extra_env or {})
     return subprocess.run(
         [sys.executable, str(SCRIPT), "hook"],
-        input=json.dumps(payload), capture_output=True, text=True, env=env,
+        input=json.dumps(payload), capture_output=True, text=True, env=env, check=False,
     )
 
 
@@ -33,9 +33,26 @@ def test_hook_writes_ledger_and_exits_zero(tmp_path):
 
 def test_hook_never_fails_on_garbage(tmp_path):
     r = subprocess.run([sys.executable, str(SCRIPT), "hook"], input="not json{",
-                       capture_output=True, text=True,
+                       capture_output=True, text=True, check=False,
                        env={**os.environ, "TOKEN_USAGE_LEDGER_DIR": str(tmp_path)})
     assert r.returncode == 0
+
+
+def test_hook_never_fails_on_wrong_shaped_payload(tmp_path):
+    # Valid JSON that is not a hook payload: json.load() succeeds, so the
+    # JSONDecodeError guard never sees it, and payload.get() / Path() then
+    # raised outside the broad try that exists so a hook can never break the
+    # session. Exit 1 plus a traceback on stderr is exactly that break.
+    env = {**os.environ, "TOKEN_USAGE_LEDGER_DIR": str(tmp_path / "ledger")}
+    env.pop("TOKEN_USAGE_BUDGET_USD", None)
+    for payload in ("null", "[1, 2, 3]", '"hello"', "42", "true",
+                    '{"session_id": "s", "transcript_path": 42}',
+                    '{"session_id": "s", "transcript_path": ["a"]}',
+                    '{"session_id": "s", "transcript_path": null}'):
+        r = subprocess.run([sys.executable, str(SCRIPT), "hook"], input=payload,
+                           capture_output=True, text=True, env=env, check=False)
+        assert r.returncode == 0, (payload, r.stderr)
+        assert r.stdout.strip() == "" and r.stderr.strip() == "", payload
 
 
 def test_budget_nudge_fires_once(tmp_path):
@@ -146,7 +163,7 @@ def test_subagent_stop_reaggregates_full_session(tmp_path):
     # SubagentStop delivers the subagent's own sidechain transcript; the hook
     # must resolve the owning session and ledger the WHOLE session, not the
     # sidechain alone.
-    main, agent = make_session_with_agent(tmp_path)
+    _main, agent = make_session_with_agent(tmp_path)
     r = run_hook({"session_id": "sess-1", "transcript_path": str(agent),
                   "hook_event_name": "SubagentStop"}, tmp_path)
     assert r.returncode == 0
@@ -203,3 +220,90 @@ def test_hook_recovers_from_non_dict_ledger(tmp_path):
     assert r.returncode == 0
     ledger = json.loads((ledger_dir / "bud-4.json").read_text())
     assert ledger["total"]["usage"]["output"] == 1000      # ledger self-healed
+
+
+def test_hook_reports_a_failed_ledger_write(tmp_path):
+    # The nudge is the plugin's headline feature; an unwritable cache dir used
+    # to kill it with zero output on any channel. stderr is free (the hook's
+    # contract is stdout + exit status), so say what broke.
+    if os.geteuid() == 0:
+        import pytest
+        pytest.skip("root ignores directory permissions")
+    t = make_transcript(tmp_path, out_tokens=1_000_000)          # ≈ $50
+    ro = tmp_path / "readonly"
+    ro.mkdir()
+    ro.chmod(0o500)
+    try:
+        r = run_hook({"session_id": "ro-1", "transcript_path": str(t)}, tmp_path,
+                     {"TOKEN_USAGE_LEDGER_DIR": str(ro / "ledger"),
+                      "TOKEN_USAGE_BUDGET_USD": "10"})
+    finally:
+        ro.chmod(0o700)
+    assert r.returncode == 0                                     # never break the session
+    assert "hook: ledger update failed" in r.stderr
+    # ...and the nudge itself still goes out: it was computed before the write
+    # failed, and losing the headline feature to a broken cache dir is exactly
+    # the silence this test exists to prevent. stdout stays hook protocol.
+    assert json.loads(r.stdout)["systemMessage"].startswith(
+        "token-usage: session estimate $50.00 has passed")
+
+
+def test_hook_never_fails_on_undecodable_stdin(tmp_path):
+    # json.load(sys.stdin) DECODES before it parses, so a non-UTF-8 byte raises
+    # UnicodeDecodeError — a ValueError, but not a JSONDecodeError — and walks
+    # straight past the guard: rc=1 plus a traceback on every Stop, which is
+    # the one thing a hook must never do. PYTHONIOENCODING pins strict UTF-8
+    # decoding, the ordinary desktop locale (a POSIX locale hides this behind
+    # PEP 538 coercion to surrogateescape).
+    env = {**os.environ, "TOKEN_USAGE_LEDGER_DIR": str(tmp_path / "ledger"),
+           "PYTHONIOENCODING": "utf-8"}
+    env.pop("TOKEN_USAGE_BUDGET_USD", None)
+    for raw in (b'\xff\xfe{"a": 1}', b"\xff", b"\x80\x81\x82",
+                b'{"session_id": "s", "transcript_path": "\xff\xfe"}'):
+        r = subprocess.run([sys.executable, str(SCRIPT), "hook"], input=raw,
+                           capture_output=True, env=env, check=False)
+        assert r.returncode == 0, (raw, r.stderr)
+        assert r.stdout == b"" and r.stderr == b"", raw
+
+
+def test_hook_survives_an_ascii_stdio_encoding(tmp_path):
+    # launchd/cron/containers hand the hook a POSIX locale: stdin then decodes
+    # as ASCII, and a well-formed payload naming a path with one non-ASCII
+    # character died in the decode. Hook payloads are JSON — UTF-8 by spec —
+    # so the bytes must be decoded as UTF-8 whatever the locale says, and the
+    # nudge must come back out as ASCII-safe JSON.
+    t = write_jsonl(tmp_path / "café" / "t.jsonl", [
+        user("2026-06-12T10:00:00Z", command="/big"),
+        assistant("2026-06-12T10:00:01Z", usage(out=1_000_000), request_id="r1"),
+    ])
+    payload = json.dumps({"session_id": "loc-1", "transcript_path": str(t)},
+                         ensure_ascii=False).encode()
+    env = {**os.environ, "TOKEN_USAGE_LEDGER_DIR": str(tmp_path / "ledger"),
+           "PYTHONIOENCODING": "ascii", "TOKEN_USAGE_BUDGET_USD": "10"}
+    r = subprocess.run([sys.executable, str(SCRIPT), "hook"], input=payload,
+                       capture_output=True, env=env, check=False)
+    assert r.returncode == 0, r.stderr
+    assert "budget" in json.loads(r.stdout.decode())["systemMessage"]
+    ledger = json.loads((tmp_path / "ledger" / "loc-1.json").read_text())
+    assert ledger["total"]["cost_usd"] == 50.0
+
+
+def test_hook_survives_a_closed_stdout_pipe(tmp_path):
+    # print() only buffers: CPython flushes sys.stdout at INTERPRETER SHUTDOWN,
+    # after run_hook's `except Exception` has already returned 0, so a reader
+    # that closed the pipe turned a successful hook into rc=120 plus
+    # "Exception ignored on flushing sys.stdout" — a broken session for a
+    # reason no channel explains.
+    t = make_transcript(tmp_path, out_tokens=1_000_000)       # ≈ $50: the nudge prints
+    env = {**os.environ, "TOKEN_USAGE_LEDGER_DIR": str(tmp_path / "ledger"),
+           "TOKEN_USAGE_BUDGET_USD": "10"}
+    p = subprocess.Popen([sys.executable, str(SCRIPT), "hook"], stdin=subprocess.PIPE,
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
+    p.stdout.close()                                          # the reader is gone
+    p.stdin.write(json.dumps({"session_id": "pipe-1", "transcript_path": str(t)}).encode())
+    p.stdin.close()
+    err = p.stderr.read().decode()
+    p.stderr.close()
+    assert p.wait() == 0, err
+    assert "Exception ignored" not in err and "BrokenPipeError" not in err
+    assert json.loads((tmp_path / "ledger" / "pipe-1.json").read_text())["budget_notified"]

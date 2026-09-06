@@ -1,8 +1,8 @@
 ---
 name: report
-description: Generate a per-activity breakdown of Claude Code or Cowork token usage and estimated API cost for the current or a past session, attributing usage to slash commands (Claude Code) or skills (Cowork), including subagent rollups, per-agent-type and per-model breakdowns, cross-session history with burn rate, compare mode, budget nudge status, and rule-based spend insights. This skill should be used when the user asks "where did my tokens go", "token usage report", "how many tokens did that command or skill use", "what did this session cost", "which command/skill/subagent/model used the most tokens", "show me token history", "what did I spend this week", "what's my burn rate", "token history by day/project/command/model", "compare token usage between two sessions", "any tips on my token spend", "analyse my token usage", or "why was this session expensive".
+description: Generate a per-activity breakdown of Claude Code or Cowork token usage and estimated API cost for the current or a past session, attributing usage to slash commands (Claude Code) or skills (Cowork), including subagent rollups, per-agent-type and per-model breakdowns, cross-session history with burn rate, compare mode, budget nudge status, and rule-based spend insights. This skill should be used when the user asks "where did my tokens go", "token usage report", "how many tokens did that command or skill use", "what did this session cost", "which command/skill/subagent/model used the most tokens", "show me token history", "what did I spend this week", "what's my burn rate", "token history by day/project/command/model", "compare token usage between two sessions", "which sessions cost the most", "costliest sessions", "top consumers", "any tips on my token spend", "analyse my token usage", or "why was this session expensive".
 argument-hint: "[transcript-path]"
-allowed-tools: Bash, Read, mcp__plugin_token-usage_token-usage__session_cost, mcp__plugin_token-usage_token-usage__history, mcp__plugin_token-usage_token-usage__insights, mcp__plugin_token-usage_token-usage__diff, mcp__plugin_token-usage_token-usage__top_consumers
+allowed-tools: Bash, Read, mcp__plugin_token-usage_token-usage__session_cost, mcp__plugin_token-usage_token-usage__history, mcp__plugin_token-usage_token-usage__insights, mcp__plugin_token-usage_token-usage__diff, mcp__plugin_token-usage_token-usage__top_consumers, mcp__token-usage__session_cost, mcp__token-usage__history, mcp__token-usage__insights, mcp__token-usage__diff, mcp__token-usage__top_consumers
 version: 0.6.0
 ---
 
@@ -14,8 +14,10 @@ Produce a per-activity token-usage breakdown for the current Claude Code session
 
 If tools named `mcp__plugin_token-usage_token-usage__session_cost`, `…__history`,
 `…__insights`, `…__diff` or `…__top_consumers` are available in this session, call them
-instead of shelling out — same data, structured result, no path resolution needed. Use
-`format: "markdown"` when the user wants the table shown verbatim. Fall back to the CLI
+instead of shelling out. (Registered by hand with `claude mcp add --scope user` the same
+tools are named `mcp__token-usage__<tool>`; both prefixes are allowed here.) Same data,
+structured result, no path resolution needed. Use `format: "markdown"` when the user
+wants the table shown verbatim. Fall back to the CLI
 below when the tools are absent (e.g. a Cowork sandbox without the server registered).
 
 ## How to run
@@ -56,7 +58,7 @@ python3 "<plugin-root>/scripts/token_usage.py" top_consumers [--by session|comma
 - With no argument, `report` and `json` auto-discover the most recently modified session transcript for the current working directory's project (`~/.claude/projects/<cwd-slug>/*.jsonl`) — normally the live session. In **Cowork** (the Claude desktop app), where there is no Claude Code project for the cwd, discovery falls back to the read-only transcript mounted in the session sandbox (`<mount>/.claude/projects/…`, `/sessions/*/mnt/.claude/projects/…`). Failing both of those, it falls back further to the newest transcript under **any** project on the machine — so running `report`/`json`/`insights` from a directory with no Claude Code history of its own will analyse whatever project's session is most recent rather than reporting "not found". Pass an explicit transcript path (or `session_id` for the MCP tools) when it matters which session gets analysed.
 - If the user supplied a path, treat it as the transcript path (a session's `.jsonl`) and pass it through.
 - For `history`, `--since` accepts relative values (`7d`, `30d`) or ISO dates (`2026-06-01`). `--by` defaults to `project`. `--project` is a substring filter that composes with any `--by`. Relative `--since` windows append a burn-rate footer (avg $/day, projected $/week).
-- For `insights`, pass a transcript for session mode OR `--since` for window mode — not both. Session mode checks cost outlier vs the 30-day project median, prompt-cache regression, ad-hoc-work dominance, unpriced models, agent fan-out concentration, and budget pace. Window mode checks spend trend, the top mover behind an increase, and unpriced models across the window. `--project` composes with `--since` the same way it does for `history`.
+- For `insights`, pass a transcript for session mode OR `--since` for window mode — not both. Session mode checks cost outlier vs the 30-day project median, prompt-cache regression, ad-hoc-work dominance, unpriced models, agent fan-out concentration, and budget pace. Window mode checks spend trend, the top mover behind an increase, and unpriced models across the window. `--project` composes with `--since` the same way it does for `history`; it is a window-mode filter only, so passing it without `--since` is an error rather than a silently ignored flag.
 
 A live ledger may also exist at `~/.cache/token-usage/<session-id>.json` (maintained by this plugin's Stop hook). Prefer running the script fresh — it is fast (~1s) and always current mid-turn; the ledger only updates at turn boundaries. The Stop hook is Claude-Code-only, so in Cowork there is no ledger — always run the script fresh.
 
@@ -87,18 +89,21 @@ Use session mode (no `--since`) when the user asks about the current or a specif
 1. Show the findings verbatim — each is a `- [warn|info] message` line, already worded for a human to read.
 2. Add at most 1–2 sentences of interpretation on top (e.g. which finding is most actionable). Do not restate every line in prose.
 3. Never invent a finding the tool didn't emit — if the tool says `No notable findings.`, say that plainly; it's a normal, healthy result, not a failure or something to explain away.
+4. The output says what it managed to examine — pass that on rather than dropping it. `No sessions in window — nothing was scanned.` means the scan found no transcripts at all (check the window and `--project`). A trailing `(baseline: …)` — which appears whether or not anything fired, because several rules need no baseline — means some rules were off: `(baseline: N prior session(s); the comparison rules need 5)` switches off cost-outlier and cache-regression for that project, and `(baseline: no sessions in the window's first half; …)` (or `no spend …`, when the first half held sessions that spent nothing) switches off spend-trend and top-mover for that window. A footnote reading `No Claude Code projects directory at <path> — nothing was scanned.` means there was no corpus to read at all — usually a wrong `TOKEN_USAGE_PROJECTS_DIR` or a different `HOME` — so report it as a setup problem, not as "you spent nothing". In every case an expensive session or a rising trend could have gone unremarked, so don't present the findings shown as the complete picture.
 
 ## Interpreting the columns
 
 - **Activity** — a slash command (one row per command name, summed across invocations), a skill invoked via the Skill tool in Cowork (also shown as `/skill-name`), or `(no command)` for turns before the first command/skill in the session. `(+N agents)` means N subagent transcripts were rolled up into that row.
 - **Output** — tokens the model generated; the dominant cost driver at 5× the input rate.
 - **Cache read / Cache write** — prompt-cache traffic. Cache reads cost ~0.1× the input rate (0.025× on Fable 5.1 / Mythos 5.1); large cache-read numbers are normal for long sessions and much cheaper than they look.
-- **Est. cost** — computed per model from the bundled pricing table (`data/pricing.json`) plus any user overlay, cache-aware (5m writes at 1.25×, 1h writes at 2×, reads at the model's cache-hit rate). `—` means the model was not in the pricing table.
+- **Est. cost** — computed per model from the bundled pricing table (`data/pricing.json`) plus any user overlay, cache-aware (5m writes at 1.25×, 1h writes at 2×, reads at the model's cache-hit rate). `—` means the model was not in the pricing table. In `top_consumers`, a trailing `*` marks a cost that prices only part of the row's usage (the rest ran on an unpriced model) — those rows are ranked on an understated number, so say so rather than reading the figure straight.
 
 ## Troubleshooting
 
 - "transcript not found: <path>": the path passed does not exist (typo, stale path, wrong machine) — check it before looking anywhere else.
-- "no transcript found": no path was passed, the cwd does not map to a Claude Code project directory, and no Cowork mount was found. Ask the user for the transcript path, or list `~/.claude/projects/` (Claude Code) / `/sessions/*/mnt/.claude/projects/` (Cowork) to locate the right transcript.
+- "no transcript found": nothing was passed and discovery found no transcripts at all — not under `~/.claude/projects` (Claude Code), nor a Cowork mount. Ask the user for the transcript path, or list `~/.claude/projects/` / `/sessions/*/mnt/.claude/projects/` to locate the right transcript.
+- "no transcript found under … (project dir …)" from an MCP tool: the projects tree exists but *that* project has no sessions yet. An explicit project dir never falls back to another project's session — pass `transcript` or `session_id` for a session elsewhere.
+- "TOKEN_USAGE_TRANSCRIPT is set to <path> but that file does not exist": the environment override points at a missing file; unset it or fix the path.
 - Zero rows / empty table: the session has no assistant turns yet.
 - Costs look ~2.5× too high vs `/cost`: the dedup-by-requestId logic failed — verify the transcript entries carry `requestId` fields and report the issue.
 - `history` shows fewer sessions than expected: `--since` filters by the first timestamp in each transcript; sessions with no timestamps are skipped.

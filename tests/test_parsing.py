@@ -187,3 +187,72 @@ def test_no_command_only_before_first_command(tu, tmp_path):
     assert data["by_label"][tu.OTHER_LABEL]["usage"]["output"] == 10
     assert data["by_label"][tu.OTHER_LABEL]["invocations"] == 1      # ONE sticky segment
     assert data["by_label"]["/commit"]["usage"]["output"] == 10
+
+
+def test_undecodable_transcript_bytes_are_replaced_not_fatal(tu, tmp_path):
+    # A transcript with a few undecodable bytes must still parse: open() ran
+    # with strict UTF-8, so one stray byte turned every reader (report, json,
+    # insights, the hook, the corpus scan) into a UnicodeDecodeError traceback.
+    p = tmp_path / "t.jsonl"
+    p.write_bytes(
+        json.dumps(user("2026-06-12T10:00:00Z", command="/build")).encode() + b"\n"
+        + json.dumps(assistant("2026-06-12T10:00:01Z", usage(out=100), request_id="r1")).encode() + b"\n"
+        + b'{"type": "user", "message": {"role": "user", "content": "caf\xe9"}}\n'
+        + b"\xff\xfe\x00\n"
+        + json.dumps(assistant("2026-06-12T10:00:02Z", usage(out=50), request_id="r2")).encode()
+        + b"\n")
+    by_model, _ts = tu.sum_transcript(p)
+    assert by_model["claude-fable-5"]["output"] == 150
+    segs = tu.parse_session(p)
+    assert sum(s["by_model"]["claude-fable-5"]["output"] for s in segs) == 150
+
+
+def test_cli_report_survives_an_undecodable_transcript(tmp_path):
+    import os
+    import subprocess
+    import sys
+
+    from conftest import SCRIPT
+    p = tmp_path / "t.jsonl"
+    p.write_bytes(b"\xff\xfe\x00\n" + json.dumps(
+        assistant("2026-06-12T10:00:01Z", usage(out=100), request_id="r1")).encode() + b"\n")
+    r = subprocess.run([sys.executable, str(SCRIPT), "report", str(p)],
+                       capture_output=True, text=True, check=False,
+                       env={**os.environ, "TOKEN_USAGE_LEDGER_DIR": str(tmp_path / "c")})
+    assert r.returncode == 0, r.stderr
+    assert "Total" in r.stdout
+
+
+def test_undecodable_lines_are_counted_and_warned_once(tu, tmp_path, capsys):
+    # A few bad bytes must not cost the whole transcript — but the lines that
+    # are lost have to be disclosed, or a real 500-token turn just evaporates
+    # from the numbers. One warning per file, however many passes read it
+    # (summarize_transcript alone parses each transcript twice).
+    p = tmp_path / "t.jsonl"
+    lines = [json.dumps(assistant("2026-06-12T10:00:01Z", usage(out=100),
+                                  request_id="r1")).encode(),
+             json.dumps(assistant("2026-06-12T10:00:02Z", usage(out=500),
+                                  request_id="r2")).encode() + b"\xff",
+             json.dumps(assistant("2026-06-12T10:00:03Z", usage(out=50),
+                                  request_id="r3")).encode()]
+    p.write_bytes(b"\n".join(lines) + b"\n")
+    by_model, _ts = tu.sum_transcript(p)
+    assert by_model["claude-fable-5"]["output"] == 150        # r1 and r3 still count
+    tu.sum_transcript(p)                                      # a second pass over the file
+    assert capsys.readouterr().err == \
+        f"token-usage: {p}: 1 line(s) had undecodable bytes\n"
+
+
+def test_a_transcript_that_decodes_to_nothing_is_unreadable(tu, tmp_path):
+    import pytest
+    # Nothing parsed at all is not a zero-usage session: summarize_transcript
+    # raises so iter_summaries can route it to skipped_transcripts, the way an
+    # unreadable file already is.
+    binary = tmp_path / "binary.jsonl"
+    binary.write_bytes(b"\xff\xfe\x00\x01\x02\n")
+    with pytest.raises(tu.UnreadableTranscript):
+        tu.summarize_transcript(binary, tu.load_pricing())
+    assert isinstance(tu.UnreadableTranscript("x"), ValueError)   # iter_summaries catches it
+    empty = tmp_path / "empty.jsonl"
+    empty.write_bytes(b"")
+    assert tu.summarize_transcript(empty, tu.load_pricing())["total"]["usage"]["output"] == 0
